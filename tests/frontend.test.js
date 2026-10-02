@@ -55,6 +55,16 @@ test('完整内联脚本语法有效', () => {
   assert.doesNotThrow(() => new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]));
 });
 
+test('相邻同色柱块增加对比色分隔线，非相邻同色不加线且保持高度', () => {
+  const ctx = context();
+  vm.runInContext(html.slice(html.indexOf('function stackedSegments('), html.indexOf('function drawCharts(')), ctx);
+  const output = vm.runInContext("stackedSegments([['a',10],['b',20],['c',30],['d',40]],v=>v,k=>k==='c'?'#3b82f6':'#ff5252')",ctx);
+  assert.equal((output.match(/box-shadow/g) || []).length,1);
+  assert.match(output,/height:20%;background:#ff5252;box-shadow:inset 0 -1px 0 #172033/);
+  assert.match(output,/height:40%;background:#ff5252;"/);
+  assert.match(vm.runInContext("stackedSegments([['a',10],['b',20]],v=>v,()=> '#171717')",ctx), /box-shadow:inset 0 -1px 0 #ffffff/);
+});
+
 test('Agent 多选与模型筛选共同生效，清空 Agent 选择恢复全部', () => {
   const ctx = context();
   vm.runInContext(`curPreset='all';DATA.records=[
@@ -71,7 +81,7 @@ test('Agent 多选与模型筛选共同生效，清空 Agent 选择恢复全部'
 
 function rankingContext() {
   const ctx = context();
-  vm.runInContext('const agentColor=()=>"#58a6ff";', ctx);
+  vm.runInContext('const agentColor=()=>"#58a6ff", modelColor=()=>"#ff5252", categoryColor=()=>"#22c55e";', ctx);
   vm.runInContext(html.slice(html.indexOf('function aggregateRanking('), html.indexOf('function drawBreakdowns(')), ctx);
   vm.runInContext(html.slice(html.indexOf('function pieSlices('), html.indexOf('function renderDetails(')), ctx);
   return ctx;
@@ -123,4 +133,28 @@ test('饼图合并小占比和超过前 7 项的用量，总量不丢失且零�
   assert.equal(vm.runInContext('slices[7].count', ctx), 2);
   assert.equal(vm.runInContext("pieSlices([{fullName:'zero',weight:0}]).length", ctx), 0);
   assert.equal(vm.runInContext('pieSlices([]).length', ctx), 0);
+});
+
+
+test('模型颜色在新增、移除和刷新后稳定，排行饼图使用统一配色', () => {
+  const values=new Map();
+  const create=()=>{
+    const ctx=vm.createContext({localStorage:{getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)}});
+    vm.runInContext(html.slice(html.indexOf('const PALETTE ='),html.indexOf('// ---------- 格式化')),ctx);
+    return ctx;
+  };
+  const ctx=create();
+  const red=vm.runInContext("modelColor('first')",ctx);assert.equal(red,'#ff5252');
+  vm.runInContext("modelColor('new'); categoryColor('projects','project');",ctx);
+  assert.equal(vm.runInContext("modelColor('first')",ctx),red);
+  assert.equal(vm.runInContext("modelColor('third')",ctx),'#ffdf00');
+  assert.equal(vm.runInContext("modelColor('first')",create()),red);
+  assert.match(html,/detailKind==='model' \? modelColor\(s.key\)/);
+  assert.match(html,/outline:1px solid var\(--text\);outline-offset:-1px/);
+});
+
+test('发布脚本只指向扩展仓库且不覆盖同名资产', () => {
+  const build=fs.readFileSync(path.join(__dirname,'..','build.js'),'utf8');
+  assert.match(build,/const REPO = 'YFan945\/UsageMonitor'/);
+  assert.doesNotMatch(build,/--clobber/);
 });

@@ -39,20 +39,19 @@ fn pick<'a>(v: &'a Value, fields: &[&str]) -> &'a Value {
     fields.iter().find_map(|k| v.get(*k).filter(|x| !x.is_null())).unwrap_or(&Value::Null)
 }
 
-pub fn parse(file: &Path, agent: &str) -> Vec<(String, String, Session, Rec)> {
-    let Ok(raw) = std::fs::File::open(file) else { return Vec::new(); };
+pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, Session, Rec)>> {
+    let raw = std::fs::File::open(file)?;
     let reader: Box<dyn Read> = if file.extension().map(|x|x=="zstd").unwrap_or(false) {
-        let Ok(decoder) = zstd::stream::read::Decoder::new(raw) else { return Vec::new(); };Box::new(decoder)
+        let decoder = zstd::stream::read::Decoder::new(raw)?;Box::new(decoder)
     } else {Box::new(raw)};
     let mut model = "unknown".to_string();
     let mut cwd = String::new();
     let mut id = file.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let mut previous: Option<[i64; 4]> = None;
     let mut retry = 0;
     let mut out = Vec::new();
     let mut indices: HashMap<String, usize> = HashMap::new();
     for line in BufReader::new(reader).lines() {
-        let Ok(line) = line else { break; };
+        let line = line?;
         if agent == "codex" && !["session_meta","turn_context","token_count"].iter().any(|t|line.contains(t)) {continue;}
         if ["claude","workbuddy","codebuddy"].contains(&agent) && !line.contains("usage") {continue;}
         let Ok(e) = serde_json::from_str::<Value>(&line) else { continue; };
@@ -86,11 +85,7 @@ pub fn parse(file: &Path, agent: &str) -> Vec<(String, String, Session, Rec)> {
             if e["type"] != "event_msg" || p["type"] != "token_count" || !p["info"]["total_token_usage"].is_object() { continue; }
             let total = &p["info"]["total_token_usage"];
             let counts = [token_count(&total["input_tokens"]), token_count(&total["output_tokens"]), token_count(&total["cached_input_tokens"]), token_count(&total["cache_write_input_tokens"])];
-            if previous.map(|prev| counts.iter().zip(prev).all(|(n, p)| *n <= p)).unwrap_or(false) { continue; }
-            let delta: Vec<i64> = counts.iter().enumerate().map(|(i, n)| previous.map(|prev| (*n - prev[i]).max(0)).unwrap_or(*n)).collect();
-            previous = Some(counts);
-            if delta.iter().all(|n| *n == 0) { continue; }
-            (json!({"input_tokens":delta[0],"output_tokens":delta[1],"cached_input_tokens":delta[2],"cache_write_input_tokens":delta[3]}), format!("{id}:{}:{}:{}:{}",counts[0],counts[1],counts[2],counts[3]), true)
+            (json!({"input_tokens":counts[0],"output_tokens":counts[1],"cached_input_tokens":counts[2],"cache_write_input_tokens":counts[3]}), format!("{id}:{}:{}:{}:{}",counts[0],counts[1],counts[2],counts[3]), true)
         } else if ["claude", "workbuddy", "codebuddy"].contains(&agent) {
             let valid_type = if agent == "claude" { e["type"] == "assistant" } else { ["assistant","function_call","message"].iter().any(|t| e["type"] == *t) };
             if !valid_type || !e["message"]["usage"].is_object() { continue; }
@@ -113,28 +108,32 @@ pub fn parse(file: &Path, agent: &str) -> Vec<(String, String, Session, Rec)> {
         let r = token_count(pick(&u, &["inputCacheRead", "cache_read_input_tokens", "cached_input_tokens", "cacheReadTokens"]));
         let c = token_count(pick(&u, &["inputCacheCreation", "cache_creation_input_tokens", "cache_write_input_tokens", "cacheWriteTokens"]));
         let input = token_count(pick(&u, &["inputOther", "input_tokens", "inputTokens"]));
-        let mut rec = Rec {s:0,t,m:model.clone(),tool:agent.to_string(),a:e["agentId"].as_str().unwrap_or("main").to_string(),i:if inclusive {(input-r-c).max(0)} else {input},o:token_count(pick(&u, &["output", "output_tokens", "outputTokens"])),r,c};
-        if agent != "dsh" { if let Some(i) = indices.get(&key) { let old: &(String,String,Session,Rec) = &out[*i];rec.i=rec.i.max(old.3.i);rec.o=rec.o.max(old.3.o);rec.r=rec.r.max(old.3.r);rec.c=rec.c.max(old.3.c); } }
+        let mut rec = Rec {s:0,t,m:model.clone(),tool:agent.to_string(),a:e["agentId"].as_str().unwrap_or("main").to_string(),i:input,inclusive,o:token_count(pick(&u, &["output", "output_tokens", "outputTokens"])),r,c};
+        if agent != "dsh" { if let Some(i) = indices.get(&key) { let old: &(String,String,Session,Rec) = &out[*i];rec.i=rec.i.max(old.3.i);rec.o=rec.o.max(old.3.o);rec.r=rec.r.max(old.3.r);rec.c=rec.c.max(old.3.c);rec.inclusive |= old.3.inclusive;if agent=="codex" && old.3.t<rec.t {rec.t=old.3.t;rec.m=old.3.m.clone();rec.a=old.3.a.clone();} } }
         let session = Session {id:sid.clone(),cwd:cwd.clone(),title:e["title"].as_str().unwrap_or_default().to_string(),tool:agent.to_string(),created_at:t,updated_at:t};
         let entry = (sid,key.clone(),session,rec);
         if let Some(i) = indices.get(&key) { out[*i] = entry; } else { indices.insert(key,out.len());out.push(entry); }
     }
-    out
+    Ok(out)
 }
 
-pub fn files(root: &Path) -> Vec<std::path::PathBuf> {
-    fn walk(root: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>, seen: &mut std::collections::HashSet<std::path::PathBuf>) {
+#[cfg(test)]
+pub fn files(root: &Path) -> Vec<std::path::PathBuf> {files_with_warnings(root).0}
+
+pub fn files_with_warnings(root: &Path) -> (Vec<std::path::PathBuf>,Vec<(std::path::PathBuf,String)>) {
+    fn walk(root: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>, seen: &mut std::collections::HashSet<std::path::PathBuf>, errors: &mut Vec<(std::path::PathBuf,String)>) {
         if depth > 12 { return; }
-        let Ok(real) = std::fs::canonicalize(root) else { return; };
+        let real = match std::fs::canonicalize(root) {Ok(p)=>p,Err(e)=>{errors.push((root.into(),e.to_string()));return;}};
         if !seen.insert(real.clone()) { return; }
-        let Ok(entries) = std::fs::read_dir(real) else { return; };
-        for e in entries.flatten() {
-            let Ok(kind) = e.file_type() else { continue; };
-            if kind.is_dir() { walk(&e.path(),depth+1,out,seen); }
+        let entries = match std::fs::read_dir(&real) {Ok(v)=>v,Err(e)=>{errors.push((real,e.to_string()));return;}};
+        for e in entries {
+            let e=match e {Ok(e)=>e,Err(e)=>{errors.push((root.into(),e.to_string()));continue;}};
+            let kind=match e.file_type() {Ok(k)=>k,Err(error)=>{errors.push((e.path(),error.to_string()));continue;}};
+            if kind.is_dir() { walk(&e.path(),depth+1,out,seen,errors); }
             else if kind.is_file() && (e.path().extension().map(|x| x == "jsonl").unwrap_or(false) || e.file_name().to_string_lossy().ends_with(".jsonl.zstd")) { out.push(e.path()); }
         }
     }
-    let mut out = Vec::new();walk(root,0,&mut out,&mut Default::default());out.sort();out
+    let mut out = Vec::new();let mut errors=Vec::new();walk(root,0,&mut out,&mut Default::default(),&mut errors);out.sort();(out,errors)
 }
 
 pub fn select_dsh_files(files: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
@@ -161,7 +160,7 @@ pub fn parse_zcode_database(file: &Path) -> Result<Vec<(String,String,Session,Re
         let count=|i:usize| -> Result<i64,rusqlite::Error> {Ok(token_count(&json!(row.get::<_,i64>(i)?)))};
         let r=count(8)?;let c=count(9)?;
         let session=Session {id:sid.clone(),cwd:row.get::<_,Option<String>>(10)?.unwrap_or_default(),title:row.get::<_,Option<String>>(11)?.unwrap_or_default(),tool:"zcode".into(),created_at:t,updated_at:t};
-        let rec=Rec {s:0,t,m:row.get(2)?,a:row.get::<_,Option<String>>(3)?.unwrap_or_else(||"main".into()),tool:"zcode".into(),i:(count(6)?-r-c).max(0),o:count(7)?,r,c};
+        let rec=Rec {s:0,t,m:row.get(2)?,a:row.get::<_,Option<String>>(3)?.unwrap_or_else(||"main".into()),tool:"zcode".into(),i:count(6)?,inclusive:true,o:count(7)?,r,c};
         Ok((sid.clone(),format!("{sid}:{event}"),session,rec))
     })?;
     rows.collect()

@@ -39,4 +39,4 @@ PR 应说明问题、行为变化、影响版本和验证结果；有关联 issu
 
 ## 配置与发布注意事项
 
-不要提交 `config.json`、`port.txt`、日志或真实会话数据；扫描保持只读，服务绑定 loopback。版本独立管理：Rust 核对 npm、Cargo 及 Tauri 配置，Node 核对 `packaging/installer.iss`。非 `v1.*` 的版本标签触发 Rust 构建并生成 Release 草稿，核验后再发布；Node 补丁不设为 Latest。`node build.js --release` 会直接新建 Release 或覆盖同名资产，仅在明确授权发布时执行。说明文件须区分自动化验证、打包成功与实机验收，不能将它们互相替代。
+不要提交 `config.json`、`port.txt`、日志或真实会话数据；扫描保持只读，服务绑定 loopback。版本独立管理：Rust 核对 npm、Cargo 及 Tauri 配置，Node 核对 `packaging/installer.iss`。非 `v1.*` 的版本标签触发 Rust 构建并生成 Release 草稿，核验后再发布；Node 补丁不设为 Latest。`node build.js --release` 仅向扩展仓库新建 Release 或添加资产，拒绝覆盖同名资产，仅在明确授权发布时执行。说明文件须区分自动化验证、打包成功与实机验收，不能将它们互相替代。

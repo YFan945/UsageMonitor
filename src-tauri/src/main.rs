@@ -37,6 +37,7 @@ struct Rec {
     o: i64,
     r: i64,
     c: i64,
+    inclusive: bool,
 }
 
 #[derive(Clone)]
@@ -72,6 +73,20 @@ struct Engine {
     default_probe: Option<(bool, Option<Value>)>,
     agent_cache: HashMap<(String, PathBuf), (i64, u64, Vec<(String, String, Session, Rec)>)>,
     scan_warnings: Vec<Value>,
+}
+
+fn merge_duplicate(records: &mut [Rec], ids: &mut HashMap<String,usize>, agent: &str, event: &str, rec: &Rec) -> bool {
+    let key=format!("{agent}:{event}");
+    if let Some(i)=ids.get(&key) {
+        let old=&mut records[*i];
+        if agent=="dsh" {if rec.t>=old.t {let si=old.s;*old=rec.clone();old.s=si;}}
+        else {
+            old.i=old.i.max(rec.i);old.o=old.o.max(rec.o);old.r=old.r.max(rec.r);old.c=old.c.max(rec.c);
+            if if agent=="codex" {rec.t<old.t} else {rec.t>=old.t} {old.t=rec.t;old.m=rec.m.clone();old.a=rec.a.clone();}
+            old.inclusive |= rec.inclusive;
+        }
+        true
+    } else {ids.insert(key,records.len());false}
 }
 
 fn now_ms() -> i64 {
@@ -156,7 +171,9 @@ impl Engine {
 
     fn load_config(&mut self) {
         self.cfg = Config::default();
-        if let Ok(text) = std::fs::read_to_string(self.config_file()) {
+        if let Some(text) = [self.config_file(),self.config_dir.join("config.json.bak")].iter().find_map(|p| {
+            std::fs::read_to_string(p).ok().filter(|s|serde_json::from_str::<Value>(s).is_ok())
+        }) {
             if let Ok(j) = serde_json::from_str::<Value>(&text) {
                 if let Some(a) = j.get("roots").and_then(|v| v.as_array()) {
                     self.cfg.roots = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
@@ -183,7 +200,22 @@ impl Engine {
     fn save_config(&self) -> std::io::Result<()> {
         let body = json!({"roots": self.cfg.roots, "setupDone": self.cfg.setup_done,"monitors":self.cfg.monitors,"models":self.cfg.models});
         std::fs::create_dir_all(&self.config_dir)?;
-        std::fs::write(self.config_file(), serde_json::to_string_pretty(&body).unwrap_or_default())
+        let temp=self.config_dir.join("config.json.tmp");
+        let result=(|| {
+            let mut f=std::fs::File::create(&temp)?;
+            f.write_all(serde_json::to_string_pretty(&body)?.as_bytes())?;f.sync_all()?;drop(f);
+            if let Ok(old)=std::fs::read_to_string(self.config_file()) {
+                if serde_json::from_str::<Value>(&old).is_ok() {
+                    let backup_temp=self.config_dir.join("config.json.bak.tmp");
+                    let mut backup=std::fs::File::create(&backup_temp)?;
+                    backup.write_all(old.as_bytes())?;backup.sync_all()?;drop(backup);
+                    std::fs::rename(backup_temp,self.config_dir.join("config.json.bak"))?;
+                }
+            }
+            std::fs::rename(&temp,self.config_file())
+        })();
+        if result.is_err() {let _=std::fs::remove_file(temp);}
+        result
     }
 
     // session_index.jsonl: sessionId -> workDir（state.json 缺 cwd 时的兜底）；
@@ -239,6 +271,7 @@ impl Engine {
                 o: token_count(&u["output"]),
                 r: token_count(&u["inputCacheRead"]),
                 c: token_count(&u["inputCacheCreation"]),
+                inclusive: false,
             });
         }
         out
@@ -336,7 +369,7 @@ impl Engine {
         for root in self.cfg.roots.clone() {
             self.scan_root(Path::new(&root), &mut sessions, &mut records, &mut seen, &mut seen_sessions);
         }
-        let mut event_ids = HashSet::new();
+        let mut event_ids: HashMap<String,usize> = HashMap::new();
         let mut agent_seen = HashSet::new();
         for m in self.cfg.monitors.clone().unwrap_or_default() {
             if m["enabled"] != true { continue; }
@@ -350,7 +383,7 @@ impl Engine {
             if agent=="zcode" && database.exists() {
                 match agents::parse_zcode_database(&database) {
                     Ok(data)=>for (sid,event,session,mut rec) in data {
-                        if !event_ids.insert(format!("{agent}:{event}")) {continue;}
+                        if merge_duplicate(&mut records, &mut event_ids, agent, &event, &rec) {continue;}
                         let si=sessions.iter().position(|s|s.tool==agent && s.id==sid).unwrap_or_else(||{sessions.push(session);sessions.len()-1});
                         rec.s=si;records.push(rec);
                     },
@@ -358,7 +391,9 @@ impl Engine {
                 }
                 continue;
             }
-            let files = agents::files(root);
+            if let Err(e) = std::fs::read_dir(root) { self.scan_warnings.push(json!({"agent":agent,"root":root,"error":e.to_string()})); continue; }
+            let (files,errors) = agents::files_with_warnings(root);
+            for (file,error) in errors {self.scan_warnings.push(json!({"agent":agent,"root":root,"file":file,"error":error}));}
             let files = if agent == "dsh" {agents::select_dsh_files(files)} else {files};
             for file in files {
                 let key = (agent.to_string(),file.clone());
@@ -367,10 +402,13 @@ impl Engine {
                 let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
                 let data = match self.agent_cache.get(&key) {
                     Some((m,s,data)) if *m == mtime && *s == size => data.clone(),
-                    _ => { let data = agents::parse(&file,agent); self.agent_cache.insert(key,(mtime,size,data.clone())); data }
+                    _ => { let data = match agents::parse(&file,agent) {
+                        Ok(data)=>data,
+                        Err(e)=>{self.scan_warnings.push(json!({"agent":agent,"root":root,"file":file,"error":e.to_string()}));continue;}
+                    }; self.agent_cache.insert(key,(mtime,size,data.clone())); data }
                 };
                 for (sid,event,session,mut rec) in data {
-                    if !event_ids.insert(format!("{agent}:{event}")) { continue; }
+                    if merge_duplicate(&mut records, &mut event_ids, agent, &event, &rec) { continue; }
                     let si = sessions.iter().position(|s| s.tool == agent && s.id == sid).unwrap_or_else(|| {sessions.push(session);sessions.len()-1});
                     rec.s = si;records.push(rec);
                 }
@@ -378,6 +416,21 @@ impl Engine {
         }
         self.agent_cache.retain(|k,_| agent_seen.contains(k));
         self.wire_cache.retain(|k, _| seen.contains_key(k));
+        records.sort_by_key(|r|r.t);
+        let mut previous: HashMap<usize,[i64;4]> = HashMap::new();
+        for r in &mut records {
+            if r.tool == "codex" {
+                let counts=[r.i,r.o,r.r,r.c];
+                let prev=previous.entry(r.s).or_insert([0;4]);
+                r.i=(counts[0]-prev[0]).max(0);r.o=(counts[1]-prev[1]).max(0);r.r=(counts[2]-prev[2]).max(0);r.c=(counts[3]-prev[3]).max(0);
+                for i in 0..4 {prev[i]=prev[i].max(counts[i]);}
+            }
+            if r.inclusive {r.i=(r.i-r.r-r.c).max(0);}
+        }
+        records.retain(|r|r.tool!="codex" || r.i+r.o+r.r+r.c>0);
+        for session in &mut sessions {if session.tool!="kimi" {session.created_at=i64::MAX;session.updated_at=0;}}
+        for r in &records {let s=&mut sessions[r.s];if s.tool=="kimi" {continue;}s.created_at=s.created_at.min(r.t);s.updated_at=s.updated_at.max(r.t);}
+        for s in &mut sessions {if s.created_at==i64::MAX {s.created_at=0;}}
         (sessions, records)
     }
 
@@ -502,49 +555,52 @@ fn static_asset(p: &str) -> Option<(&'static [u8], &'static str)> {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
+fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>), &'static str> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     // 读完请求头
     let header_end = loop {
         match stream.read(&mut tmp) {
-            Ok(0) => return None,
+            Ok(0) => return Err("400 Bad Request"),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
                 if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                    if pos+4>1024*1024 {return Err("413 Payload Too Large");}
                     break pos + 4;
                 }
                 if buf.len() > 1024 * 1024 {
-                    return None;
+                    return Err("413 Payload Too Large");
                 }
             }
-            Err(_) => return None,
+            Err(_) => return Err("400 Bad Request"),
         }
     };
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
     let mut lines = head.split("\r\n");
-    let request_line = lines.next()?.to_string();
+    let request_line = lines.next().ok_or("400 Bad Request")?.to_string();
     let mut content_length = 0usize;
     for l in lines {
         let lower = l.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0);
+            content_length = v.trim().parse().map_err(|_|"400 Bad Request")?;
+            if content_length>1024*1024 {return Err("413 Payload Too Large");}
         }
     }
     let mut body = buf[header_end..].to_vec();
+    if body.len()>1024*1024 {return Err("413 Payload Too Large");}
     while body.len() < content_length {
         match stream.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&tmp[..n]),
-            Err(_) => break,
+            Ok(0) => return Err("400 Bad Request"),
+            Ok(n) => {if body.len()+n>1024*1024 {return Err("413 Payload Too Large");}body.extend_from_slice(&tmp[..n]);},
+            Err(_) => return Err("400 Bad Request"),
         }
     }
     body.truncate(content_length);
     let mut parts = request_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path_full = parts.next()?.to_string();
+    let method = parts.next().ok_or("400 Bad Request")?.to_string();
+    let path_full = parts.next().ok_or("400 Bad Request")?.to_string();
     let path = path_full.split('?').next().unwrap_or("/").to_string();
-    Some((method, path, body))
+    Ok((method, path, body))
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -578,7 +634,10 @@ fn http_server(engine: std::sync::Arc<std::sync::Mutex<Engine>>, app: AppHandle,
 
 fn handle_conn(mut stream: TcpStream, engine: std::sync::Arc<std::sync::Mutex<Engine>>, app: AppHandle) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let Some((method, path, body)) = read_request(&mut stream) else { return Ok(()) };
+    let (method,path,body)=match read_request(&mut stream) {
+        Ok(request)=>request,
+        Err(status)=>return respond(&mut stream,status,"application/json; charset=utf-8",json!({"error":if status.starts_with("413") {"请求超过 1 MiB 限制"} else {"请求不完整或格式错误"}}).to_string().into_bytes())
+    };
 
     if path == "/api/data" && method == "GET" {
         let s = engine.lock().map(|mut e| e.get_data_string()).unwrap_or_else(|_| "{\"error\":\"监控数据暂不可用\"}".into());
@@ -838,11 +897,11 @@ mod tests {
         let f=Fixture::new();
         let buddy=json!({"type":"function_call","sessionId":"buddy","timestamp":"2026-10-02T10:00:00Z","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40}},"providerData":{"messageId":"response","model":"buddy-test","rawUsage":{}}}).to_string();
         f.write("buddy.jsonl",&format!("{buddy}\n{buddy}"));
-        let parsed=agents::parse(&f.0.join("buddy.jsonl"),"workbuddy");
-        assert_eq!(parsed.len(),1);assert_eq!(parsed[0].3.i,60);
+        let parsed=agents::parse(&f.0.join("buddy.jsonl"),"workbuddy").unwrap();
+        assert_eq!(parsed.len(),1);assert_eq!(parsed[0].3.i,100);assert!(parsed[0].3.inclusive);
         f.write("zcode.jsonl",&json!({"type":"model_io","completedAt":"2026-10-02T10:00:00Z","sessionId":"z","response":{"responseId":"response","modelId":"glm-test","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":40}}}).to_string());
-        let parsed=agents::parse(&f.0.join("zcode.jsonl"),"zcode");
-        assert_eq!(parsed[0].3.i,60);assert_eq!(parsed[0].3.m,"glm-test");
+        let parsed=agents::parse(&f.0.join("zcode.jsonl"),"zcode").unwrap();
+        assert_eq!(parsed[0].3.i,100);assert!(parsed[0].3.inclusive);assert_eq!(parsed[0].3.m,"glm-test");
         let message=|n:i64| json!({"type":"assistant/message","time":1790935200000i64,"data":{"turn":1,"step":1,"message":{"source":{"model":"deepseek-test"}},"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":n,"cacheReadTokens":80}}}]}}).to_string();
         let text=format!("{}\n{}\n{}\n{}\n{}\n{}\n{}",json!({"type":"session","id":"dsh","version":4}),message(999),json!({"type":"session/end-seed"}),message(4),message(5),json!({"type":"llm/retry-started"}),message(6));
         let compressed=zstd::stream::encode_all(text.as_bytes(),0).unwrap();
@@ -850,7 +909,7 @@ mod tests {
         f.write("session.v3.jsonl",&text);
         let files=agents::select_dsh_files(agents::files(&f.0));
         assert!(!files.contains(&f.0.join("session.v3.jsonl")));
-        let parsed=agents::parse(&f.0.join("session.v4.jsonl.zstd"),"dsh");
+        let parsed=agents::parse(&f.0.join("session.v4.jsonl.zstd"),"dsh").unwrap();
         assert_eq!(parsed.len(),2);
         assert_eq!(parsed.iter().map(|x|x.3.o).sum::<i64>(),11);
         assert!(parsed.iter().all(|x|x.3.i==20 && x.3.r==80));
@@ -863,12 +922,64 @@ mod tests {
         db.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT);CREATE TABLE model_usage(id TEXT PRIMARY KEY,session_id TEXT,model_id TEXT,agent TEXT,started_at INTEGER,completed_at INTEGER,input_tokens INTEGER,output_tokens INTEGER,cache_read_input_tokens INTEGER,cache_creation_input_tokens INTEGER);INSERT INTO session VALUES('s','project','title');INSERT INTO model_usage VALUES('call','s','glm','main',1790935200000,1790935200001,100,10,40,5);").unwrap();
         db.close().unwrap();let before=std::fs::read(&file).unwrap();
         let parsed=agents::parse_zcode_database(&file).unwrap();
-        assert_eq!(parsed.len(),1);assert_eq!((parsed[0].3.i,parsed[0].3.o,parsed[0].3.r,parsed[0].3.c),(55,10,40,5));
+        assert_eq!(parsed.len(),1);assert_eq!((parsed[0].3.i,parsed[0].3.o,parsed[0].3.r,parsed[0].3.c),(100,10,40,5));assert!(parsed[0].3.inclusive);
         assert_eq!(std::fs::read(&file).unwrap(),before);
         let mut e=f.engine();
         e.apply_config(&json!({"monitors":[{"agent":"zcode","root":f.0,"enabled":true}],"models":[]}));
         let data:Value=serde_json::from_str(&e.get_data_string()).unwrap();
         assert_eq!(data["records"].as_array().unwrap().len(),1);
         assert_eq!(data["sessions"][0]["cwd"],"project");
+        assert_eq!(data["records"][0]["i"],55);
     }
+    #[test]
+    fn snapshots_merge_before_cache_split_and_across_files() {
+        let f=Fixture::new();
+        let buddy=|cache| json!({"type":"assistant","sessionId":"buddy","timestamp":"2026-10-02T10:00:00Z","message":{"id":"response","model":"buddy","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":cache}},"providerData":{"rawUsage":{}}}).to_string();
+        f.write("buddy/a.jsonl",&buddy(0));f.write("buddy/b.jsonl",&buddy(40));
+        let claude=|output| json!({"type":"assistant","sessionId":"claude","timestamp":"2026-10-02T10:00:00Z","message":{"id":"response","model":"claude","usage":{"input_tokens":10,"output_tokens":output}}}).to_string();
+        f.write("claude/a.jsonl",&claude(5));f.write("claude/b.jsonl",&claude(10));
+        let codex=|n,time| format!("{}\n{}",json!({"type":"session_meta","payload":{"id":"codex"}}),json!({"type":"event_msg","timestamp":time,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":n}}}}));
+        f.write("codex/z-first.jsonl",&codex(100,"2026-10-02T10:00:00Z"));
+        f.write("codex/a-last.jsonl",&codex(300,"2026-10-02T10:01:00Z"));
+        let mut e=f.engine();e.apply_config(&json!({"roots":[],"monitors":[{"agent":"workbuddy","root":f.0.join("buddy"),"enabled":true},{"agent":"claude","root":f.0.join("claude"),"enabled":true},{"agent":"codex","root":f.0.join("codex"),"enabled":true}]}));
+        let (_,records)=e.scan();
+        let buddy=records.iter().find(|r|r.tool=="workbuddy").unwrap();assert_eq!((buddy.i,buddy.o,buddy.r),(60,10,40));
+        assert_eq!(records.iter().find(|r|r.tool=="claude").unwrap().o,10);
+        assert_eq!(records.iter().filter(|r|r.tool=="codex").map(|r|r.i).sum::<i64>(),300);
+        assert_eq!(records.len(),4);
+        let (_,cached)=e.scan();assert_eq!(cached.iter().map(|r|r.i+r.o+r.r+r.c).sum::<i64>(),430);
+    }
+
+    #[test]
+    fn unreadable_compressed_logs_report_warning_and_do_not_poison_cache() {
+        let f=Fixture::new();f.write("dsh/session.v4.jsonl.zstd","broken zstd");
+        let mut e=f.engine();e.apply_config(&json!({"roots":[],"monitors":[{"agent":"dsh","root":f.0.join("dsh"),"enabled":true}]}));
+        let (_,records)=e.scan();assert!(records.is_empty());assert_eq!(e.scan_warnings.len(),1);assert!(e.agent_cache.is_empty());
+    }
+
+    #[test]
+    fn atomic_configuration_survives_write_failure_and_recovers_backup() {
+        let f=Fixture::new();let mut e=f.engine();e.save_config().unwrap();
+        let old=std::fs::read(e.config_file()).unwrap();
+        std::fs::create_dir(e.config_dir.join("config.json.tmp")).unwrap();
+        e.cfg.models=vec!["changed".into()];assert!(e.save_config().is_err());assert_eq!(std::fs::read(e.config_file()).unwrap(),old);
+        std::fs::remove_dir(e.config_dir.join("config.json.tmp")).unwrap();e.save_config().unwrap();
+        std::fs::write(e.config_file(),"corrupt").unwrap();let recovered=Engine::new(e.config_dir.clone());assert!(recovered.cfg.models.is_empty());
+        recovered.save_config().unwrap();assert!(serde_json::from_slice::<Value>(&std::fs::read(e.config_file()).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn http_rejects_oversized_and_truncated_requests() {
+        fn request(raw:&str)->Result<(String,String,Vec<u8>),&'static str> {
+            let listener=TcpListener::bind(("127.0.0.1",0)).unwrap();
+            let mut client=TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            client.write_all(raw.as_bytes()).unwrap();client.shutdown(std::net::Shutdown::Write).unwrap();
+            let (mut server,_)=listener.accept().unwrap();read_request(&mut server)
+        }
+        assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n").unwrap_err(),"413 Payload Too Large");
+        assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: 20\r\n\r\n{}").unwrap_err(),"400 Bad Request");
+        assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: nope\r\n\r\n").unwrap_err(),"400 Bad Request");
+        assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}").unwrap().2,b"{}");
+    }
+
 }

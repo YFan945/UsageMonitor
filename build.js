@@ -17,7 +17,7 @@ const http = require('http');
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');
 const MAC_NODE_VER = 'v22.23.3'; // macOS 包内置的 node 版本（官方 tarball）
-const REPO = 'YFan945/kimi-usage-monitor';
+const REPO = 'YFan945/UsageMonitor';
 const args = new Set(process.argv.slice(2));
 const WANT_MAC = args.has('--mac');
 const WANT_RELEASE = args.has('--release');
@@ -261,7 +261,7 @@ print("tared")`;
     const notesFile = path.join(DIST, 'notes.md');
     fs.writeFileSync(notesFile, notes);
     const exists = spawnSync('gh', ['release', 'view', tag, '--repo', REPO], { stdio: 'ignore', shell: true }).status === 0;
-    if (exists) run('gh', ['release', 'upload', tag, ...assets, '--clobber', '--repo', REPO], { shell: true });
+    if (exists) run('gh', ['release', 'upload', tag, ...assets, '--repo', REPO], { shell: true });
     else run('gh', ['release', 'create', tag, ...assets, '--repo', REPO, '--title', tag, '--notes-file', notesFile, '--latest=false'], { shell: true });
     ok(`Release ${tag} 已更新：https://github.com/YFan945/kimi-usage-monitor/releases/tag/${tag}`);
   }

@@ -2,6 +2,9 @@
 runtime/
 dist/
 config.json
+config.json.bak
+config.json.tmp
+config.json.bak.tmp
 port.txt
 sea-prep.blob
 node_modules/

@@ -236,3 +236,47 @@ test('大型多字节 JSONL 跨读取块仍正确统计，损坏尾行不丢失�
   const data=await (await request('/api/data')).json();
   assert.equal(data.records.length,1);assert.equal(data.records[0].o,3);
 });
+
+
+test('跨文件合并原始流式缓存、最终输出及 Codex 累计快照', async () => {
+  const buddy=cache=>({type:'assistant',sessionId:'buddy-split',timestamp:'2026-10-02T10:00:00Z',message:{id:'response',model:'buddy',usage:{input_tokens:100,output_tokens:10,cache_read_input_tokens:cache}},providerData:{rawUsage:{}}});
+  const buddyRoot=writeLog('split-buddy/a.jsonl',[buddy(0),buddy(40)]);writeLog('split-buddy/b.jsonl',[buddy(40)]);
+  const claude=output=>({type:'assistant',sessionId:'claude-split',timestamp:'2026-10-02T10:00:00Z',message:{id:'response',model:'claude',usage:{input_tokens:10,output_tokens:output}}});
+  const claudeRoot=writeLog('split-claude/a.jsonl',[claude(5)]);writeLog('split-claude/b.jsonl',[claude(10)]);
+  const codex=(count,time)=>[{type:'session_meta',payload:{id:'codex-split'}},{type:'event_msg',timestamp:time,payload:{type:'token_count',info:{total_token_usage:{input_tokens:count}}}}];
+  const codexRoot=writeLog('split-codex/z-first.jsonl',codex(100,'2026-10-02T10:00:00Z'));
+  writeLog('split-codex/a-last.jsonl',codex(300,'2026-10-02T10:01:00Z'));
+  writeLog('split-codex/b-duplicate.jsonl',codex(100,'2026-10-02T10:02:00Z'));
+  const monitors=[{agent:'workbuddy',root:buddyRoot,enabled:true},{agent:'claude',root:claudeRoot,enabled:true},{agent:'codex',root:codexRoot,enabled:true}];
+  await request('/api/config',{roots:[],monitors,models:[]});
+  for(let scan=0;scan<2;scan++) {
+    const data=await (await request('/api/data')).json();
+    const b=data.records.find(r=>r.tool==='workbuddy');assert.deepEqual([b.i,b.o,b.r],[60,10,40]);
+    assert.equal(data.records.find(r=>r.tool==='claude').o,10);
+    const c=data.records.filter(r=>r.tool==='codex');assert.deepEqual(c.map(r=>r.i),[100,200]);
+    assert.equal(data.records.length,4);assert.ok(data.records.every(r=>!('_inclusive' in r)));
+  }
+});
+
+test('损坏压缩文件提示具体路径，其他文件继续统计，修复文件后自动恢复', async () => {
+  const dRoot=writeLog('broken-compressed/healthy.jsonl',[{type:'usage.record',sessionId:'healthy',eventId:'call',model:'demo',time:1790935200000,usage:{inputOther:12}}]);
+  const damaged=path.join(dRoot,'broken.jsonl.zstd');fs.writeFileSync(damaged,'broken');
+  await request('/api/config',{roots:[],monitors:[{agent:'dsh',root:dRoot,enabled:true}],models:[]});
+  const data=await (await request('/api/data')).json();
+  assert.equal(data.records.length,1);assert.equal(data.warnings.length,1);assert.equal(data.warnings[0].file,damaged);
+  fs.unlinkSync(damaged);await request('/api/config',{roots:[],monitors:[{agent:'dsh',root:dRoot,enabled:true}],models:[]});
+  assert.equal((await (await request('/api/data')).json()).warnings.length,0);
+});
+
+test('配置写入失败保留原文件与内存，成功替换保留有效备份', async () => {
+  const file=path.join(fixture,'config.json'),temp=file+'.tmp';
+  const before=fs.readFileSync(file);const config=await (await request('/api/data')).json();
+  fs.mkdirSync(temp);
+  try {assert.equal((await request('/api/config',{roots:[],monitors:[],models:['changed']})).status,500);}
+  finally {fs.rmdirSync(temp);}
+  assert.deepEqual(fs.readFileSync(file),before);
+  assert.deepEqual((await (await request('/api/data')).json()).monitors,config.monitors);
+  assert.equal((await request('/api/config',{roots:[],monitors:[],models:[]})).status,200);
+  assert.deepEqual(fs.readFileSync(file+'.bak'),before);
+  assert.doesNotThrow(()=>JSON.parse(fs.readFileSync(file,'utf8')));
+});

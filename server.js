@@ -70,9 +70,15 @@ function normalizeMonitors(monitors) {
   return monitors.map(m => ({ agent: m.agent, root: m.root.trim() ? path.normalize(m.root.trim()) : '', enabled: m.enabled }))
     .filter(m => { const key = m.agent + ':' + (process.platform === 'win32' ? m.root.toLowerCase() : m.root); if (seen.has(key)) return false; seen.add(key); return true; });
 }
+function readSavedConfig() {
+  for (const file of [CONFIG_FILE,CONFIG_FILE+'.bak']) {
+    try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch {}
+  }
+  throw new Error('没有可读取的配置');
+}
 function loadConfig() {
   try {
-    const j = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    const j = readSavedConfig();
     if (Array.isArray(j.roots)) CFG.roots = j.roots;
     if (typeof j.setupDone === 'boolean') CFG.setupDone = j.setupDone;
     else if (CFG.roots.length) CFG.setupDone = true; // 旧版配置已选过目录，视为完成引导
@@ -87,7 +93,20 @@ function loadConfig() {
 }
 loadConfig();
 function saveConfig() {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ port: PORT, ...CFG }, null, 2));
+  const temp = CONFIG_FILE + '.tmp';
+  try {
+    const fd = fs.openSync(temp, 'w');
+    try { fs.writeFileSync(fd, JSON.stringify({port:PORT,...CFG},null,2)); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    if (fs.existsSync(CONFIG_FILE)) {
+      const old = fs.readFileSync(CONFIG_FILE,'utf8');
+      let valid=false;try {JSON.parse(old);valid=true;} catch {}
+      if (valid) {const backup=fs.openSync(CONFIG_FILE+'.bak.tmp','w');try {fs.writeFileSync(backup,old);fs.fsyncSync(backup);} finally {fs.closeSync(backup);}}
+      if (valid) fs.renameSync(CONFIG_FILE + '.bak.tmp',CONFIG_FILE + '.bak');
+    }
+    fs.renameSync(temp,CONFIG_FILE);
+  } finally { try {fs.unlinkSync(temp);} catch {} }
+
 }
 
 // 单文件 exe（SEA）模式下首次运行自动创建桌面快捷方式（仅 Windows；由 config.json 的 shortcut 标记保证只创建一次）
@@ -317,7 +336,7 @@ function scan() {
   for (const root of CFG.roots) scanRoot(root, sessions, records, seen, seenSessions);
   for (const s of sessions) s.tool = 'kimi';
   for (const r of records) r.tool = 'kimi';
-  const eventIds = new Set();
+  const eventIds = new Map();
   const warnings = [];
   for (const monitor of CFG.monitors || []) {
     if (!monitor.enabled || !monitor.root) continue;
@@ -327,10 +346,14 @@ function scan() {
       for (const s of sessions.slice(si)) s.tool = 'kimi';
       for (const r of records.slice(ri)) r.tool = 'kimi';
     } else {
-      try { scanAgent(monitor, sessions, records, seen, eventIds); }
+      try { scanAgent(monitor, sessions, records, seen, eventIds, warnings); }
       catch (e) { warnings.push({agent:monitor.agent,root:monitor.root,error:String(e.message || e)}); }
     }
   }
+  finalizeAgentRecords(records);
+  for (const session of sessions) if (session.tool !== 'kimi') {session.createdAt=Infinity;session.updatedAt=0;}
+  for (const rec of records) {const session=sessions[rec.s];if (session.tool === 'kimi') continue;session.createdAt=Math.min(session.createdAt,rec.t);session.updatedAt=Math.max(session.updatedAt,rec.t);}
+  for (const session of sessions) if (!Number.isFinite(session.createdAt)) session.createdAt=0;
   const availableModels = [...new Set(records.map(r => r.m))].sort();
   if (CFG.models.length) {
     const allowed = new Set(CFG.models);
@@ -343,7 +366,7 @@ function scan() {
 // 只解析明确的用量事件；不会把聊天文字或会话数量估算为 token。
 function parseAgentFile(file, agent) {
   const sessionMap = new Map(), out = new Map();
-  let model = 'unknown', cwd = '', id = path.basename(file, '.jsonl'), previous = null, retry = 0;
+  let model = 'unknown', cwd = '', id = path.basename(file, '.jsonl'), retry = 0;
   for (const line of readLogLines(file)) {
     if (agent === 'codex' && !['session_meta','turn_context','token_count'].some(type => line.includes(type))) continue;
     if (['claude','workbuddy','codebuddy'].includes(agent) && !line.includes('usage')) continue;
@@ -374,12 +397,7 @@ function parseAgentFile(file, agent) {
       const total = p.info.total_token_usage;
       const fields = ['input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_input_tokens'];
       const counts = fields.map(k => tokenCount(total[k]));
-      const delta = counts.map((n, i) => previous ? Math.max(0, n - previous[i]) : n);
-      // 相同累计值（包括限额刷新）不产生新调用；累计值回退也不重复统计。
-      if (previous && counts.every((n, i) => n <= previous[i])) continue;
-      previous = counts;
-      if (!delta.some(Boolean)) continue;
-      u = { input_tokens: delta[0], output_tokens: delta[1], cached_input_tokens: delta[2], cache_write_input_tokens: delta[3] };
+      u = { input_tokens: counts[0], output_tokens: counts[1], cached_input_tokens: counts[2], cache_write_input_tokens: counts[3] };
       inclusive = true;
       key = id + ':' + counts.join(':');
     } else if (['claude', 'workbuddy', 'codebuddy'].includes(agent)) {
@@ -403,10 +421,14 @@ function parseAgentFile(file, agent) {
     const c = tokenCount(u.inputCacheCreation ?? u.cache_creation_input_tokens ?? u.cache_write_input_tokens ?? u.cacheWriteTokens);
     const input = tokenCount(u.inputOther ?? u.input_tokens ?? u.inputTokens);
     const record = { sid, key, t, m: model, tool: agent, a: e.agentId || 'main',
-      i: inclusive ? Math.max(0, input - r - c) : input,
+      i: input, _inclusive: inclusive,
       o: tokenCount(u.output ?? u.output_tokens ?? u.outputTokens), r, c };
     const existing = out.get(key);
-    if (existing && agent !== 'dsh') for (const field of ['i', 'o', 'r', 'c']) record[field] = Math.max(record[field], existing[field]);
+    if (existing && agent !== 'dsh') {
+      for (const field of ['i','o','r','c']) record[field] = Math.max(record[field],existing[field]);
+      record._inclusive ||= existing._inclusive;
+      if (agent === 'codex' && existing.t < record.t) Object.assign(record,{t:existing.t,m:existing.m,a:existing.a});
+    }
     out.set(key, record);
   }
   return { sessions: [...sessionMap.values()], records: [...out.values()] };
@@ -417,7 +439,7 @@ function* readLogLines(file) {
   try {
     if (file.endsWith('.zstd')) {
       const decompress = require('node:zlib').zstdDecompressSync;
-      if (!decompress) return;
+      if (!decompress) throw new Error('当前 Node.js 不支持 Zstandard 解压，请升级到 22.15+ 或使用桌面版');
       yield* decompress(fs.readFileSync(file), { maxOutputLength: 256 * 1024 * 1024 }).toString('utf8').split('\n');
       return;
     }
@@ -434,10 +456,9 @@ function* readLogLines(file) {
       if (start < chunk.length) pending.push(chunk.slice(start));
     }
     pending.push(decoder.end()); const tail = pending.join(''); if (tail.trim()) yield tail;
-  } catch { /* 锁定、压缩损坏或未写完的文件不阻断其他来源 */ }
-  finally { if (fd !== undefined) fs.closeSync(fd); }
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
-function scanAgent(monitor, sessions, records, seen, eventIds) {
+function scanAgent(monitor, sessions, records, seen, eventIds, warnings) {
   const database = path.join(monitor.root, 'db.sqlite');
   if (monitor.agent === 'zcode' && fs.existsSync(database)) {
     const parsed = parseZcodeDatabase(database);
@@ -447,11 +468,11 @@ function scanAgent(monitor, sessions, records, seen, eventIds) {
   const files = [], visited = new Set();
   function walk(dir, depth = 0) {
     if (depth > 12) return;
-    let real; try { real = fs.realpathSync(dir); } catch { return; }
+    const real = fs.realpathSync(dir);
     if (visited.has(real)) return; visited.add(real);
-    for (const e of listDir(real)) {
+    for (const e of fs.readdirSync(real, {withFileTypes:true})) {
       const p = path.join(real, e.name);
-      if (e.isDirectory()) walk(p, depth + 1);
+      if (e.isDirectory()) {try {walk(p, depth + 1);} catch (error) {warnings.push({agent:monitor.agent,root:monitor.root,file:p,error:error.message});}}
       else if (e.isFile() && (e.name.endsWith('.jsonl') || monitor.agent === 'dsh' && e.name.endsWith('.jsonl.zstd'))) files.push(p);
     }
   }
@@ -461,21 +482,32 @@ function scanAgent(monitor, sessions, records, seen, eventIds) {
   for (const file of selected.sort()) {
     const cacheKey = monitor.agent + ':' + file;
     seen.add(cacheKey);
-    let st; try { st = fs.statSync(file); } catch { continue; }
-    let hit = wireCache.get(cacheKey);
-    if (!hit || hit.mtimeMs !== st.mtimeMs || hit.size !== st.size) {
-      hit = { mtimeMs: st.mtimeMs, size: st.size, data: parseAgentFile(file, monitor.agent) };
-      wireCache.set(cacheKey, hit);
-    }
-    appendAgentRecords(hit.data, monitor.agent, sessions, records, eventIds);
+    try {
+      const st = fs.statSync(file);
+      let hit = wireCache.get(cacheKey);
+      if (!hit || hit.mtimeMs !== st.mtimeMs || hit.size !== st.size) {
+        hit = { mtimeMs: st.mtimeMs, size: st.size, data: parseAgentFile(file, monitor.agent) };
+        wireCache.set(cacheKey, hit);
+      }
+      appendAgentRecords(hit.data, monitor.agent, sessions, records, eventIds);
+    } catch (e) { warnings.push({agent:monitor.agent,root:monitor.root,file,error:String(e.message || e)}); }
   }
 }
 function appendAgentRecords(data, agent, sessions, records, eventIds) {
     const sessionIndices = new Map();
     for (const r of data.records) {
       const eventKey = agent + ':' + r.key;
-      if (eventIds.has(eventKey)) continue;
-      eventIds.add(eventKey);
+      const existing = eventIds.get(eventKey);
+      if (existing !== undefined) {
+        const old = records[existing];
+        if (agent === 'dsh') { if (r.t >= old.t) Object.assign(old, r, {s:old.s}); }
+        else {
+          for (const field of ['i','o','r','c']) old[field] = Math.max(old[field], r[field]);
+          if (agent === 'codex' ? r.t < old.t : r.t >= old.t) Object.assign(old, {t:r.t,m:r.m,a:r.a});
+          old._inclusive ||= r._inclusive;
+        }
+        continue;
+      }
       let si = sessionIndices.get(r.sid);
       if (si === undefined) {
         si = sessions.findIndex(s => s.tool === agent && s.id === r.sid);
@@ -483,8 +515,26 @@ function appendAgentRecords(data, agent, sessions, records, eventIds) {
         sessionIndices.set(r.sid, si);
       }
       const { sid, key, ...rec } = r;
+      eventIds.set(eventKey, records.length);
       records.push({ s: si, ...rec });
     }
+}
+// 累计快照跨文件统一排序求差；原始输入合并完成后才扣缓存。
+function finalizeAgentRecords(records) {
+  const previous = new Map();
+  records.sort((a,b) => a.t - b.t);
+  for (const rec of records) {
+    if (rec.tool === 'codex') {
+      const counts = [rec.i,rec.o,rec.r,rec.c];
+      const key = rec.s;
+      const prev = previous.get(key) || [0,0,0,0];
+      [rec.i,rec.o,rec.r,rec.c] = counts.map((n,i) => Math.max(0,n-prev[i]));
+      previous.set(key, counts.map((n,i)=>Math.max(n,prev[i])));
+    }
+    if (rec._inclusive) rec.i = Math.max(0,rec.i-rec.r-rec.c);
+    delete rec._inclusive; delete rec.sid; delete rec.key;
+  }
+  for (let i=records.length-1;i>=0;i--) if (records[i].tool === 'codex' && !['i','o','r','c'].some(k=>records[i][k])) records.splice(i,1);
 }
 function parseZcodeDatabase(file) {
   if (!DatabaseSync) throw new Error('读取 ZCode 数据库需要 Node.js 22.13+，或选择 CLI rollout JSONL 目录');
@@ -502,7 +552,7 @@ function parseZcodeDatabase(file) {
       const sid = row.session_id;
       sessionMap.set(sid, {id:sid,cwd:row.cwd || '',title:row.title || '',tool:'zcode',createdAt:t,updatedAt:t});
       records.push({sid,key:sid+':'+row.id,t,m:row.model_id || 'unknown',tool:'zcode',a:row.agent || 'main',
-        i:Math.max(0,tokenCount(row.input_tokens)-tokenCount(row.cache_read_input_tokens)-tokenCount(row.cache_creation_input_tokens)),o:tokenCount(row.output_tokens),r:tokenCount(row.cache_read_input_tokens),c:tokenCount(row.cache_creation_input_tokens)});
+        i:tokenCount(row.input_tokens),_inclusive:true,o:tokenCount(row.output_tokens),r:tokenCount(row.cache_read_input_tokens),c:tokenCount(row.cache_creation_input_tokens)});
     }
     return {sessions:[...sessionMap.values()],records};
   } finally { db.close(); }
