@@ -32,10 +32,27 @@ const HOME = process.env.USERPROFILE || process.env.HOME;
 // 配置目录：Windows SEA → exe 旁；macOS Node（含源码运行）→ Application Support；其他源码运行 → server.js 旁
 let CONFIG_DIR;
 if (isSEA) CONFIG_DIR = path.dirname(process.execPath);
-else if (process.platform === 'darwin') CONFIG_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'KimiMonitor');
+else if (process.platform === 'darwin') CONFIG_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AgentMonitor');
 else CONFIG_DIR = __dirname;
-if (process.env.KIMI_MONITOR_CONFIG_DIR) CONFIG_DIR = path.resolve(process.env.KIMI_MONITOR_CONFIG_DIR);
+const configOverride = process.env.AGENT_MONITOR_CONFIG_DIR || process.env.KIMI_MONITOR_CONFIG_DIR;
+if (configOverride) CONFIG_DIR = path.resolve(configOverride);
 try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); } catch { }
+function migrateLegacyConfig(target, legacy) {
+  if (fs.existsSync(path.join(target,'config.json')) || fs.existsSync(path.join(target,'config.json.bak'))) return;
+  for (const name of ['config.json','config.json.bak']) {
+    try {
+      const content = fs.readFileSync(path.join(legacy,name),'utf8');
+      const parsed = JSON.parse(content);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') continue;
+      fs.writeFileSync(path.join(target,'config.json'),content,{flag:'wx'});
+      return;
+    } catch (error) { if (error.code === 'EEXIST') return; }
+  }
+}
+// 仅迁移默认 macOS 配置；显式指定目录时保持隔离，旧文件保留。
+if (!isSEA && process.platform === 'darwin' && !configOverride) {
+  migrateLegacyConfig(CONFIG_DIR,path.join(os.homedir(),'Library','Application Support','KimiMonitor'));
+}
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 

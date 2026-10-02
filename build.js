@@ -179,7 +179,7 @@ case "$(uname -m)" in
   arm64) NODE_BIN="$RES/bin/node-darwin-arm64" ;;
   *)     NODE_BIN="$RES/bin/node-darwin-x64" ;;
 esac
-CFG="$HOME/Library/Application Support/KimiMonitor"
+CFG="$HOME/Library/Application Support/AgentMonitor"
 mkdir -p "$CFG"
 PORT=43110
 [ -f "$CFG/port.txt" ] && PORT=$(cat "$CFG/port.txt")
@@ -209,7 +209,7 @@ open "http://127.0.0.1:$PORT/"
     fs.writeFileSync(path.join(stage, '卸载.command'), `#!/bin/bash
 # AgentMonitor 卸载脚本
 pkill -f "node-darwin.*/AgentMonitor.app" 2>/dev/null
-rm -rf "/Applications/AgentMonitor.app" "$HOME/Library/Application Support/KimiMonitor"
+rm -rf "/Applications/AgentMonitor.app" "$HOME/Library/Application Support/AgentMonitor"
 echo "应用与 Node 配置清理操作已结束；如有错误请查看上方输出。请确认原监控进程已退出。"
 `);
     const icns = path.join(app, 'Contents', 'Resources', 'icon.icns');

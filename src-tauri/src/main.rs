@@ -683,6 +683,21 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+fn migrate_legacy_config(target: &Path, legacy: &Path) -> std::io::Result<()> {
+    if target.join("config.json").exists() || target.join("config.json.bak").exists() { return Ok(()); }
+    for name in ["config.json", "config.json.bak"] {
+        let Ok(content) = std::fs::read_to_string(legacy.join(name)) else { continue; };
+        if !serde_json::from_str::<Value>(&content).is_ok_and(|v|v.is_object()) { continue; }
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(target.join("config.json"));
+        match file {
+            Ok(mut file) => { file.write_all(content.as_bytes())?; file.sync_all()?; return Ok(()); }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let engine = std::sync::Arc::new(std::sync::Mutex::new(Engine::new(PathBuf::from(""))));
 
@@ -694,8 +709,11 @@ fn main() {
             let config_dir = app
                 .path()
                 .app_config_dir()
-                .unwrap_or_else(|_| PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("KimiMonitor"));
+                .unwrap_or_else(|_| PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AgentMonitor"));
             let _ = std::fs::create_dir_all(&config_dir);
+            if let Some(parent) = config_dir.parent() {
+                migrate_legacy_config(&config_dir, &parent.join("com.yfan945.kimimonitor"))?;
+            }
             {
                 let mut e = engine.lock().unwrap();
                 e.config_dir = config_dir;
@@ -762,6 +780,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_config_migration_preserves_legacy_and_existing_settings() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.join("legacy");
+        let target = fixture.0.join("renamed");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(legacy.join("config.json"),"corrupt").unwrap();
+        let saved = r#"{"setupDone":true,"monitors":[],"models":["gpt-5.5"]}"#;
+        std::fs::write(legacy.join("config.json.bak"),saved).unwrap();
+        migrate_legacy_config(&target,&legacy).unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("config.json")).unwrap(),saved);
+        assert_eq!(std::fs::read_to_string(legacy.join("config.json")).unwrap(),"corrupt");
+        assert_eq!(std::fs::read_to_string(legacy.join("config.json.bak")).unwrap(),saved);
+        std::fs::write(target.join("config.json"),"{}").unwrap();
+        migrate_legacy_config(&target,&legacy).unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("config.json")).unwrap(),"{}");
+        std::fs::remove_file(target.join("config.json")).unwrap();
+        std::fs::write(target.join("config.json.bak"),"{}").unwrap();
+        migrate_legacy_config(&target,&legacy).unwrap();
+        assert!(!target.join("config.json").exists());
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Fixture(PathBuf);
