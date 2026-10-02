@@ -158,3 +158,26 @@ test('发布脚本只指向扩展仓库且不覆盖同名资产', () => {
   assert.match(build,/const REPO = 'YFan945\/UsageMonitor'/);
   assert.doesNotMatch(build,/--clobber/);
 });
+
+
+test('选择 Agent 后模型和项目排行同步变化，Agent 排行保留全部来源', () => {
+  const ctx=rankingContext();
+  vm.runInContext('let rankData={}; function hbars(){};',ctx);
+  vm.runInContext(html.slice(html.indexOf('function drawBreakdowns('),html.indexOf('// 全量明细')),ctx);
+  vm.runInContext(`DATA.sessions=[{cwd:'codex-project'},{cwd:'claude-project'}];
+    const rows=[{s:0,tool:'codex',m:'gpt',i:100,o:10,r:0,c:0,t:100},{s:1,tool:'claude',m:'opus',i:200,o:20,r:0,c:0,t:100}];
+    fltAgent.add('codex');drawBreakdowns(rows);`,ctx);
+  assert.equal(vm.runInContext('rankData.model.length',ctx),1);
+  assert.equal(vm.runInContext('rankData.model[0].key',ctx),'gpt');
+  assert.equal(vm.runInContext('rankData.proj[0].key',ctx),'codex-project');
+  assert.equal(vm.runInContext('rankData.agent.length',ctx),2);
+  vm.runInContext("fltAgent.clear();drawBreakdowns(rows)",ctx);
+  assert.equal(vm.runInContext('rankData.model.length',ctx),2);
+});
+
+test('统计前两张卡片不显示冗余说明', () => {
+  const ctx=context();vm.runInContext('render()',ctx);
+  const output=vm.runInContext('$("#stats").innerHTML',ctx);
+  assert.doesNotMatch(output,/按用量记录|两类缓存/);
+  assert.doesNotMatch(output.split('<div class="stat"')[1],/class="s"/);
+});

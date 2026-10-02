@@ -14,7 +14,7 @@ pub fn catalog() -> Vec<Value> {
         ("zcode", "ZCode", ".zcode/cli/db", "native"), ("doubao", "Doubao", "", "import"),
         ("trae", "Trae", "", "import"), ("dsh", "DeepSeek Harness", ".dsh/sessions", "native"),
     ].into_iter().map(|(id, name, dir, support)| {
-        let root = if dir.is_empty() { String::new() } else { Path::new(&home).join(dir).to_string_lossy().to_string() };
+        let root = if dir.is_empty() { String::new() } else { if id=="dsh" {std::env::var("DSH_HOME").ok().filter(|p|!p.trim().is_empty()).map(|p|Path::new(&p).join("sessions")).unwrap_or_else(||Path::new(&home).join(dir)).to_string_lossy().to_string()} else {Path::new(&home).join(dir).to_string_lossy().to_string()} };
         json!({"id":id,"name":name,"support":support,"defaultRoot":root,"detected":!root.is_empty() && Path::new(&root).is_dir(),"compressedLogs":true})
     }).collect()
 }
@@ -48,12 +48,14 @@ pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, S
     let mut cwd = String::new();
     let mut id = file.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let mut retry = 0;
+    let mut seeded_at=0;
+    let mut labels: HashMap<String,String>=HashMap::new();
     let mut out = Vec::new();
     let mut indices: HashMap<String, usize> = HashMap::new();
     for line in BufReader::new(reader).lines() {
         let line = line?;
-        if agent == "codex" && !["session_meta","turn_context","token_count"].iter().any(|t|line.contains(t)) {continue;}
-        if ["claude","workbuddy","codebuddy"].contains(&agent) && !line.contains("usage") {continue;}
+        if agent == "codex" && !["session_meta","turn_context","token_count","user_message"].iter().any(|t|line.contains(t)) {continue;}
+        if ["claude","workbuddy","codebuddy"].contains(&agent) && !["usage","user","title","summary"].iter().any(|k|line.contains(k)) {continue;}
         let Ok(e) = serde_json::from_str::<Value>(&line) else { continue; };
         let p = &e["payload"];
         if agent == "codex" && e["type"] == "session_meta" {
@@ -64,10 +66,21 @@ pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, S
             model = p["model"].as_str().unwrap_or(&model).to_string();
             cwd = p["cwd"].as_str().unwrap_or(&cwd).to_string();
         }
-        if agent == "dsh" && e["type"] == "session" {id=e["id"].as_str().unwrap_or(&id).to_string();cwd=e["cwd"].as_str().unwrap_or(&cwd).to_string();}
+        if agent == "dsh" && e["type"] == "session" {id=e["id"].as_str().unwrap_or(&id).to_string();cwd=e["cwd"].as_str().unwrap_or(&cwd).to_string();seeded_at=if e["isSeeded"]==true {to_epoch(&e["createdAt"])} else {0};}
         if agent == "dsh" && e["type"] == "request/header" {model=e["data"]["header"]["config"]["model"].as_str().unwrap_or(&model).to_string();}
-        if agent == "dsh" && e["type"] == "session/end-seed" {out.clear();indices.clear();}
+        if agent == "dsh" && e["type"] == "session/end-seed" && e["data"]["inherited"]==true {out.clear();indices.clear();}
         if agent == "dsh" && e["type"] == "llm/retry-started" {retry+=1;}
+        let label_id=e["sessionId"].as_str().unwrap_or(&id).to_string();
+        let explicit=pick(&e,&["customTitle","title"]).as_str().or_else(|| {
+            if e["type"]=="summary" {e["summary"].as_str()} else if e["type"]=="session/title" {e["data"]["title"].as_str()} else {None}
+        });
+        if let Some(title)=explicit.filter(|t|!t.trim().is_empty()) {labels.insert(label_id.clone(),title.trim().into());}
+        if !labels.contains_key(&label_id) {
+            let content=if e["type"]=="user" {&e["message"]["content"]} else if e["type"]=="message" && e["role"]=="user" {&e["content"]} else if agent=="codex" && p["type"]=="user_message" {&p["message"]} else if e["type"]=="user/message" {&e["data"]["message"]["content"]} else {&Value::Null};
+            let text=if let Some(text)=content.as_str() {text.to_string()} else {content.as_array().map(|a|a.iter().filter(|x|x["type"]=="text").filter_map(|x|x["text"].as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default()};
+            let text=text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !text.is_empty() {labels.insert(label_id,format!("首条提问：{}",text.chars().take(120).collect::<String>()));}
+        }
         let (u, key, inclusive) = if agent == "zcode" && e["type"] == "model_io" {
             if !e["response"]["usage"].is_object() {continue;}
             let raw = &e["response"]["providerMetadata"]["anthropic"]["usage"];
@@ -102,7 +115,7 @@ pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, S
             (e["usage"].clone(), format!("{sid}:{event}"), false)
         };
         let t = to_epoch(pick(&e, &["timestamp", "time", "completedAt", "startedAt"]));
-        if t <= 0 { continue; }
+        if t <= 0 || agent=="dsh" && seeded_at>0 && t<seeded_at { continue; }
         let sid = e["sessionId"].as_str().unwrap_or(&id).to_string();
         cwd = e["cwd"].as_str().unwrap_or(&cwd).to_string();
         let r = token_count(pick(&u, &["inputCacheRead", "cache_read_input_tokens", "cached_input_tokens", "cacheReadTokens"]));
@@ -110,10 +123,11 @@ pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, S
         let input = token_count(pick(&u, &["inputOther", "input_tokens", "inputTokens"]));
         let mut rec = Rec {s:0,t,m:model.clone(),tool:agent.to_string(),a:e["agentId"].as_str().unwrap_or("main").to_string(),i:input,inclusive,o:token_count(pick(&u, &["output", "output_tokens", "outputTokens"])),r,c};
         if agent != "dsh" { if let Some(i) = indices.get(&key) { let old: &(String,String,Session,Rec) = &out[*i];rec.i=rec.i.max(old.3.i);rec.o=rec.o.max(old.3.o);rec.r=rec.r.max(old.3.r);rec.c=rec.c.max(old.3.c);rec.inclusive |= old.3.inclusive;if agent=="codex" && old.3.t<rec.t {rec.t=old.3.t;rec.m=old.3.m.clone();rec.a=old.3.a.clone();} } }
-        let session = Session {id:sid.clone(),cwd:cwd.clone(),title:e["title"].as_str().unwrap_or_default().to_string(),tool:agent.to_string(),created_at:t,updated_at:t};
+        let session = Session {id:sid.clone(),cwd:cwd.clone(),title:labels.get(&sid).cloned().unwrap_or_default(),tool:agent.to_string(),created_at:t,updated_at:t};
         let entry = (sid,key.clone(),session,rec);
         if let Some(i) = indices.get(&key) { out[*i] = entry; } else { indices.insert(key,out.len());out.push(entry); }
     }
+    for (sid,_,session,_) in &mut out {if let Some(title)=labels.get(sid) {session.title=title.clone();}}
     Ok(out)
 }
 
@@ -164,4 +178,49 @@ pub fn parse_zcode_database(file: &Path) -> Result<Vec<(String,String,Session,Re
         Ok((sid.clone(),format!("{sid}:{event}"),session,rec))
     })?;
     rows.collect()
+}
+
+/// 标题来自只读元数据库；仅匹配已有的会话 id，不导入其他会话或 token。
+pub fn enrich_titles(sessions: &mut [Session],monitors: &[Value],warnings: &mut Vec<Value>) {
+    let mut sources=std::collections::HashSet::new();
+    for monitor in monitors {
+        let agent=monitor["agent"].as_str().unwrap_or_default();
+        if monitor["enabled"]!=true || !["codex","workbuddy","codebuddy"].contains(&agent) {continue;}
+        let root=monitor["root"].as_str().unwrap_or_default();
+        let mut dir=std::path::PathBuf::from(root);
+        for _ in 0..5 {
+            let mut candidates:Vec<_>=std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e|e.path()).filter(|p| {
+                let name=p.file_name().unwrap_or_default().to_string_lossy();
+                if agent=="codex" {name.strip_prefix("state_").and_then(|n|n.strip_suffix(".sqlite")).and_then(|n|n.parse::<u32>().ok()).is_some()}
+                else {name==if agent=="workbuddy" {"workbuddy.db"} else {"codebuddy.db"}}
+            }).collect();
+            candidates.sort_by_key(|p|p.file_name().unwrap_or_default().to_string_lossy().strip_prefix("state_").and_then(|n|n.strip_suffix(".sqlite")).and_then(|n|n.parse::<u32>().ok()).unwrap_or(0));
+            if let Some(file)=candidates.pop() {
+                if !sources.insert((agent.to_string(),file.clone())) {break;}
+                let result=(|| -> Result<(),rusqlite::Error> {
+                    let db=rusqlite::Connection::open_with_flags(&file,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                    let table=if agent=="codex" {"threads"} else {"sessions"};
+                    let mut columns=db.prepare(&format!("PRAGMA table_info({table})"))?;
+                    let columns:Vec<String>=columns.query_map([],|row|row.get::<_,String>(1))?.filter_map(Result::ok).collect();
+                    let custom=columns.iter().any(|n|n=="custom_title");
+                    let expression=if custom {"COALESCE(NULLIF(TRIM(custom_title),''),title)"} else {"title"};
+                    let first=if columns.iter().any(|n|n=="first_user_message") {"first_user_message"} else {"NULL"};
+                    let nickname=if columns.iter().any(|n|n=="agent_nickname") {"agent_nickname"} else {"NULL"};
+                    let mut statement=db.prepare(&format!("SELECT id,{expression},{first},{nickname} FROM {table}"))?;
+                    let titles:HashMap<String,(String,String,String)>=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,(row.get::<_,Option<String>>(1)?.unwrap_or_default(),row.get::<_,Option<String>>(2)?.unwrap_or_default(),row.get::<_,Option<String>>(3)?.unwrap_or_default()))))?.filter_map(Result::ok).collect();
+                    for session in sessions.iter_mut().filter(|s|s.tool==agent) {
+                        if let Some((title,first,nickname))=titles.get(&session.id) {
+                            if !title.trim().is_empty() {session.title=title.trim().to_string();}
+                            else if session.title.is_empty() && !first.trim().is_empty() {session.title=format!("首条提问：{}",first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>());}
+                            else if session.title.is_empty() && !nickname.trim().is_empty() {session.title=format!("子 Agent：{}",nickname.trim());}
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error)=result {warnings.push(json!({"agent":agent,"root":root,"file":file,"error":format!("会话标题读取失败：{error}")}));}
+                break;
+            }
+            let Some(parent)=dir.parent() else {break;};dir=parent.to_path_buf();
+        }
+    }
 }

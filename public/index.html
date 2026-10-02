@@ -272,7 +272,7 @@ footer code{color:var(--text)}
   </div>
 
   <div class="rank-grid">
-    <div class="card"><h2 class="rank-heading" title="当前时段前 8 项，排行不受模型/项目/Agent 筛选影响；点击横条切换筛选">模型排行 · 前 8 项<button data-detail="model">查看全部</button></h2><div id="byModel"></div></div>
+    <div class="card"><h2 class="rank-heading" title="当前时段前 8 项，排行跟随 Agent 筛选；点击横条切换筛选">模型排行 · 前 8 项<button data-detail="model">查看全部</button></h2><div id="byModel"></div></div>
     <div class="card"><h2 class="rank-heading" title="当前时段前 8 项，项目按完整工作目录分组；点击横条切换筛选">项目排行 · 前 8 项<button data-detail="proj">查看全部</button></h2><div id="byProject"></div></div>
     <div class="card"><h2 class="rank-heading" title="当前时段前 8 项；点击横条切换 Agent 筛选">Agent 排行 · 前 8 项<button data-detail="agent">查看全部</button></h2><div id="byAgent"></div></div>
   </div>
@@ -560,13 +560,13 @@ function render() {
   sum.total = sum.i + sum.o + sum.r + sum.c;
 
   $('#stats').innerHTML = [
-    { k: '模型调用次数', v: fmtFull(sum.n), s: '按用量记录计数，包含子 agent' },
-    { k: 'Token 合计', v: fmt(sum.total), s: '包含输入、输出及两类缓存用量', full: sum.total },
+    { k: '模型调用次数', v: fmtFull(sum.n), s: '' },
+    { k: 'Token 合计', v: fmt(sum.total), s: '', full: sum.total },
     { k: '输入（未缓存）', v: fmt(sum.i), s: pct(sum.i, sum.total), full: sum.i },
     { k: '输出', v: fmt(sum.o), s: pct(sum.o, sum.total), full: sum.o },
     { k: '缓存读取', v: fmt(sum.r), s: pct(sum.r, sum.total), full: sum.r },
     { k: '缓存创建', v: fmt(sum.c), s: pct(sum.c, sum.total), full: sum.c },
-  ].map(x => `<div class="stat" ${x.full != null ? `title="${fmtFull(x.full)} tokens"` : ''}><div class="k">${x.k}</div><div class="v">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
+  ].map(x => `<div class="stat" ${x.full != null ? `title="${fmtFull(x.full)} tokens"` : ''}><div class="k">${x.k}</div><div class="v">${x.v}</div>${x.s ? `<div class="s">${x.s}</div>` : ''}</div>`).join('');
 
   const sTxt = range.start ? fmtTime(range.start) : '最早记录';
   const eTxt = range.end ? fmtTime(range.end) : '现在';
@@ -864,7 +864,8 @@ function aggregateRanking(recs, kind, incCr) {
 function drawBreakdowns(recsRange) {
   const incCr = $('#includeCr').checked;
   for (const [kind, id, selected] of [['model','byModel',fltModel], ['proj','byProject',fltProj], ['agent','byAgent',fltAgent]]) {
-    rankData[kind] = aggregateRanking(recsRange, kind, incCr);
+    const records = kind !== 'agent' && fltAgent.size ? recsRange.filter(r=>fltAgent.has(r.tool || 'kimi')) : recsRange;
+    rankData[kind] = aggregateRanking(records, kind, incCr);
     hbars($('#' + id), rankData[kind].slice(0,8), e => `${fmtFull(e.calls)} 次 · ${fmt(e.weight)} tokens`, kind, selected);
   }
 }
@@ -890,7 +891,7 @@ function renderDetails() {
   $('#detailTitle').textContent = `${titles[detailKind]} · ${entries.length} 项`;
   $('#detailScope').textContent = isSessions
     ? $('#rangeInfo').textContent + '；按 Token 合计排序，包含缓存读取。'
-    : '当前时段全部记录，不受模型 / 项目 / Agent 筛选影响；按 Token 用量排序。' + ($('#includeCr').checked ? '计入缓存读取。' : '不计入缓存读取。');
+    : (detailKind !== 'agent' && fltAgent.size ? `当前 Agent：${[...fltAgent].map(agentName).join('、')}；` : '当前时段全部 Agent；') + '按 Token 用量排序。' + ($('#includeCr').checked ? '计入缓存读取。' : '不计入缓存读取。');
   const total = entries.reduce((s,e) => s + e.weight, 0);
   $('#detailTable').innerHTML = `<table><thead><tr><th>排名</th><th>${isSessions ? '项目 / 会话' : '名称'}</th><th class="num">调用次数</th><th class="num">未缓存输入</th><th class="num">输出</th><th class="num">缓存读取</th><th class="num">缓存创建</th><th class="num">${isSessions ? 'Token 合计' : '排行 Token'}</th><th class="num">占比</th></tr></thead><tbody>` + entries.map((e,i) => {
     const sess = isSessions ? DATA.sessions[e.key] || {} : null;

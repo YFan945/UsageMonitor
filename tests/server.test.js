@@ -280,3 +280,36 @@ test('配置写入失败保留原文件与内存，成功替换保留有效备�
   assert.deepEqual(fs.readFileSync(file+'.bak'),before);
   assert.doesNotThrow(()=>JSON.parse(fs.readFileSync(file,'utf8')));
 });
+
+
+test('会话标题读取只读数据库、自定义标题及首条提问，后续用量不覆盖标题', async t => {
+  let DatabaseSync;try {DatabaseSync=require('node:sqlite').DatabaseSync;} catch {t.skip('当前 Node 无 SQLite');return;}
+  const cRoot=writeLog('title-codex/sessions/thread.jsonl',[{type:'session_meta',payload:{id:'thread-title'}},{type:'event_msg',timestamp:'2026-10-02T10:00:00Z',payload:{type:'token_count',info:{total_token_usage:{input_tokens:100}}}}]);
+  const cFile=path.join(path.dirname(cRoot),'state_5.sqlite'),cDb=new DatabaseSync(cFile);
+  cDb.exec("CREATE TABLE threads(id TEXT,title TEXT);INSERT INTO threads VALUES('thread-title','Codex 数据库标题');");cDb.close();
+  const assistant={type:'assistant',sessionId:'wb-title',timestamp:'2026-10-02T10:00:00Z',message:{id:'wb-call',model:'buddy',usage:{input_tokens:10,output_tokens:2}}};
+  const wRoot=writeLog('title-workbuddy/projects/thread.jsonl',[assistant]);
+  const wFile=path.join(path.dirname(wRoot),'workbuddy.db'),wDb=new DatabaseSync(wFile);
+  wDb.exec("CREATE TABLE sessions(id TEXT,title TEXT,custom_title TEXT);INSERT INTO sessions VALUES('wb-title','自动标题','用户自定义标题');");wDb.close();
+  const clRoot=writeLog('title-claude/main.jsonl',[{type:'user',sessionId:'cl-title',message:{content:'第一个问题'}},{...assistant,sessionId:'cl-title'}, {type:'custom-title',sessionId:'cl-title',customTitle:'Claude 重命名标题'}]);
+  writeLog('title-claude/fallback.jsonl',[{type:'user',sessionId:'fallback-title',message:{content:[{type:'text',text:'没有正式标题的提问'}]}},{...assistant,sessionId:'fallback-title'}]);
+  const before=[fs.readFileSync(cFile),fs.readFileSync(wFile)];
+  await request('/api/config',{roots:[],monitors:[{agent:'codex',root:cRoot,enabled:true},{agent:'workbuddy',root:wRoot,enabled:true},{agent:'claude',root:clRoot,enabled:true}],models:[]});
+  const data=await (await request('/api/data')).json(),titles=new Map(data.sessions.map(s=>[s.id,s.title]));
+  assert.equal(titles.get('thread-title'),'Codex 数据库标题');assert.equal(titles.get('wb-title'),'用户自定义标题');
+  assert.equal(titles.get('cl-title'),'Claude 重命名标题');assert.equal(titles.get('fallback-title'),'首条提问：没有正式标题的提问');
+  assert.deepEqual(fs.readFileSync(cFile),before[0]);assert.deepEqual(fs.readFileSync(wFile),before[1]);assert.equal(data.warnings.length,0);
+});
+
+test('DSH 拼接压缩帧完整解码，普通恢复标记保留用量，继承历史不重复计入', async t => {
+  const zlib=require('node:zlib');if(!zlib.zstdCompressSync) {t.skip('Node 缺少 Zstandard');return;}
+  const time=1790935200000;
+  const usage=(step,at)=>({type:'assistant/message',time:at,data:{turn:1,step,usage:{inputTokens:20,outputTokens:5},message:{source:{model:'deepseek'}}}});
+  const dRoot=path.join(fixture,'dsh-frames');fs.mkdirSync(dRoot,{recursive:true});
+  const frames=[[{type:'session',id:'original',isSeeded:false,createdAt:time-1000}], [usage(1,time),{type:'session/end-seed',time:time+1,data:{}}],[usage(2,time+2),{type:'session/title',data:{title:'DSH 真实标题'}},{type:'session/end-seed',time:time+3,data:{}}]];
+  const file=path.join(dRoot,'session.v4.jsonl.zstd');fs.writeFileSync(file,Buffer.concat(frames.map(rows=>zlib.zstdCompressSync(rows.map(e=>JSON.stringify(e)).join('\n')+'\n'))));
+  writeLog('dsh-fork/session.v4.jsonl',[{type:'session',id:'fork',isSeeded:true,createdAt:time},usage(1,time-10),{type:'session/end-seed',data:{inherited:true}},usage(2,time+1),{type:'session/end-seed',data:{}}]);
+  await request('/api/config',{roots:[],monitors:[{agent:'dsh',root:dRoot,enabled:true},{agent:'dsh',root:path.join(fixture,'dsh-fork'),enabled:true}],models:[]});
+  const data=await (await request('/api/data')).json();assert.equal(data.records.length,3);assert.equal(data.records.reduce((n,r)=>n+r.o,0),15);
+  assert.equal(data.sessions.find(s=>s.id==='original').title,'DSH 真实标题');assert.equal(data.warnings.length,0);
+});

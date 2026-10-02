@@ -408,6 +408,7 @@ impl Engine {
                     }; self.agent_cache.insert(key,(mtime,size,data.clone())); data }
                 };
                 for (sid,event,session,mut rec) in data {
+                    if !session.title.is_empty() {if let Some(old)=sessions.iter_mut().find(|s|s.tool==agent && s.id==sid) {if old.title.is_empty() || old.title.starts_with("首条提问：") {old.title=session.title.clone();}}}
                     if merge_duplicate(&mut records, &mut event_ids, agent, &event, &rec) { continue; }
                     let si = sessions.iter().position(|s| s.tool == agent && s.id == sid).unwrap_or_else(|| {sessions.push(session);sessions.len()-1});
                     rec.s = si;records.push(rec);
@@ -431,6 +432,7 @@ impl Engine {
         for session in &mut sessions {if session.tool!="kimi" {session.created_at=i64::MAX;session.updated_at=0;}}
         for r in &records {let s=&mut sessions[r.s];if s.tool=="kimi" {continue;}s.created_at=s.created_at.min(r.t);s.updated_at=s.updated_at.max(r.t);}
         for s in &mut sessions {if s.created_at==i64::MAX {s.created_at=0;}}
+        agents::enrich_titles(&mut sessions,&self.cfg.monitors.clone().unwrap_or_default(),&mut self.scan_warnings);
         (sessions, records)
     }
 
@@ -903,7 +905,7 @@ mod tests {
         let parsed=agents::parse(&f.0.join("zcode.jsonl"),"zcode").unwrap();
         assert_eq!(parsed[0].3.i,100);assert!(parsed[0].3.inclusive);assert_eq!(parsed[0].3.m,"glm-test");
         let message=|n:i64| json!({"type":"assistant/message","time":1790935200000i64,"data":{"turn":1,"step":1,"message":{"source":{"model":"deepseek-test"}},"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":n,"cacheReadTokens":80}}}]}}).to_string();
-        let text=format!("{}\n{}\n{}\n{}\n{}\n{}\n{}",json!({"type":"session","id":"dsh","version":4}),message(999),json!({"type":"session/end-seed"}),message(4),message(5),json!({"type":"llm/retry-started"}),message(6));
+        let text=format!("{}\n{}\n{}\n{}\n{}\n{}\n{}",json!({"type":"session","id":"dsh","version":4}),message(999),json!({"type":"session/end-seed","data":{"inherited":true}}),message(4),message(5),json!({"type":"llm/retry-started"}),message(6));
         let compressed=zstd::stream::encode_all(text.as_bytes(),0).unwrap();
         std::fs::write(f.0.join("session.v4.jsonl.zstd"),compressed).unwrap();
         f.write("session.v3.jsonl",&text);
@@ -980,6 +982,35 @@ mod tests {
         assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: 20\r\n\r\n{}").unwrap_err(),"400 Bad Request");
         assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: nope\r\n\r\n").unwrap_err(),"400 Bad Request");
         assert_eq!(request("POST /api/config HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}").unwrap().2,b"{}");
+    }
+
+    #[test]
+    fn titles_use_readonly_metadata_and_log_labels() {
+        let f=Fixture::new();
+        f.write("title-codex/sessions/thread.jsonl",&format!("{}\n{}",json!({"type":"session_meta","payload":{"id":"thread-title"}}),json!({"type":"event_msg","timestamp":"2026-10-02T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100}}}})));
+        let c_file=f.0.join("title-codex/state_5.sqlite");let db=rusqlite::Connection::open(&c_file).unwrap();db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT);INSERT INTO threads VALUES('thread-title','Codex 数据库标题');").unwrap();db.close().unwrap();
+        let assistant=|sid:&str|json!({"type":"assistant","sessionId":sid,"timestamp":"2026-10-02T10:00:00Z","message":{"id":"call","model":"demo","usage":{"input_tokens":10,"output_tokens":2}}}).to_string();
+        f.write("title-workbuddy/projects/thread.jsonl",&assistant("wb-title"));
+        let w_file=f.0.join("title-workbuddy/workbuddy.db");let db=rusqlite::Connection::open(&w_file).unwrap();db.execute_batch("CREATE TABLE sessions(id TEXT,title TEXT,custom_title TEXT);INSERT INTO sessions VALUES('wb-title','自动标题','用户自定义标题');").unwrap();db.close().unwrap();
+        f.write("title-claude/thread.jsonl",&format!("{}\n{}\n{}",json!({"type":"user","sessionId":"cl-title","message":{"content":"第一个问题"}}),assistant("cl-title"),json!({"type":"custom-title","sessionId":"cl-title","customTitle":"Claude 自定义标题"})));
+        f.write("title-claude/fallback.jsonl",&format!("{}\n{}",json!({"type":"user","sessionId":"fallback","message":{"content":[{"type":"text","text":"没有正式标题的提问"}]}}),assistant("fallback")));
+        let bytes=(std::fs::read(&c_file).unwrap(),std::fs::read(&w_file).unwrap());
+        let mut e=f.engine();e.apply_config(&json!({"roots":[],"monitors":[{"agent":"codex","root":f.0.join("title-codex/sessions"),"enabled":true},{"agent":"workbuddy","root":f.0.join("title-workbuddy/projects"),"enabled":true},{"agent":"claude","root":f.0.join("title-claude"),"enabled":true}]}));
+        let (sessions,_)=e.scan();let titles:HashMap<_,_>=sessions.iter().map(|s|(s.id.as_str(),s.title.as_str())).collect();
+        assert_eq!(titles["thread-title"],"Codex 数据库标题");assert_eq!(titles["wb-title"],"用户自定义标题");assert_eq!(titles["cl-title"],"Claude 自定义标题");assert_eq!(titles["fallback"],"首条提问：没有正式标题的提问");
+        assert_eq!(std::fs::read(c_file).unwrap(),bytes.0);assert_eq!(std::fs::read(w_file).unwrap(),bytes.1);assert!(e.scan_warnings.is_empty());
+    }
+
+    #[test]
+    fn dsh_multiframe_restore_keeps_usage_and_excludes_fork_history() {
+        let f=Fixture::new();let time=1790935200000i64;
+        let usage=|step,at|json!({"type":"assistant/message","time":at,"data":{"turn":1,"step":step,"usage":{"inputTokens":20,"outputTokens":5},"message":{"source":{"model":"deepseek"}}}});
+        let frames=vec![vec![json!({"type":"session","id":"original","isSeeded":false,"createdAt":time-1000})],vec![usage(1,time),json!({"type":"session/end-seed","data":{}})],vec![usage(2,time+1),json!({"type":"session/title","data":{"title":"DSH 真实标题"}}),json!({"type":"session/end-seed","data":{}})]];
+        let mut compressed=Vec::new();for frame in frames {let text=frame.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n";compressed.extend(zstd::stream::encode_all(text.as_bytes(),1).unwrap());}
+        f.write("dsh-original/session.v4.jsonl.zstd","");std::fs::write(f.0.join("dsh-original/session.v4.jsonl.zstd"),compressed).unwrap();
+        f.write("dsh-fork/session.v4.jsonl",&vec![json!({"type":"session","id":"fork","isSeeded":true,"createdAt":time}),usage(1,time-10),json!({"type":"session/end-seed","data":{"inherited":true}}),usage(2,time+1),json!({"type":"session/end-seed","data":{}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n"));
+        let mut e=f.engine();e.apply_config(&json!({"roots":[],"monitors":[{"agent":"dsh","root":f.0.join("dsh-original"),"enabled":true},{"agent":"dsh","root":f.0.join("dsh-fork"),"enabled":true}]}));
+        let (sessions,records)=e.scan();assert_eq!(records.len(),3);assert_eq!(records.iter().map(|r|r.o).sum::<i64>(),15);assert_eq!(sessions.iter().find(|s|s.id=="original").unwrap().title,"DSH 真实标题");assert!(e.scan_warnings.is_empty());
     }
 
 }

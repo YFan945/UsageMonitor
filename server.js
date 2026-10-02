@@ -60,7 +60,7 @@ const AGENTS = [
   ['doubao', 'Doubao', '', 'import'],
   ['trae', 'Trae', '', 'import'],
   ['dsh', 'DeepSeek Harness', '.dsh/sessions', 'native'],
-].map(([id, name, dir, support]) => ({ id, name, support, defaultRoot: dir ? path.join(HOME, dir) : '' }));
+].map(([id, name, dir, support]) => ({ id, name, support, defaultRoot: dir ? path.join(id === 'dsh' && process.env.DSH_HOME ? process.env.DSH_HOME : HOME, id === 'dsh' && process.env.DSH_HOME ? 'sessions' : dir) : '' }));
 function validMonitors(monitors) {
   return Array.isArray(monitors) && monitors.every(m => m && AGENTS.some(a => a.id === m.agent) &&
     typeof m.root === 'string' && typeof m.enabled === 'boolean');
@@ -354,6 +354,7 @@ function scan() {
   for (const session of sessions) if (session.tool !== 'kimi') {session.createdAt=Infinity;session.updatedAt=0;}
   for (const rec of records) {const session=sessions[rec.s];if (session.tool === 'kimi') continue;session.createdAt=Math.min(session.createdAt,rec.t);session.updatedAt=Math.max(session.updatedAt,rec.t);}
   for (const session of sessions) if (!Number.isFinite(session.createdAt)) session.createdAt=0;
+  enrichSessionTitles(sessions, warnings);
   const availableModels = [...new Set(records.map(r => r.m))].sort();
   if (CFG.models.length) {
     const allowed = new Set(CFG.models);
@@ -366,18 +367,27 @@ function scan() {
 // 只解析明确的用量事件；不会把聊天文字或会话数量估算为 token。
 function parseAgentFile(file, agent) {
   const sessionMap = new Map(), out = new Map();
-  let model = 'unknown', cwd = '', id = path.basename(file, '.jsonl'), retry = 0;
+  let model = 'unknown', cwd = '', id = path.basename(file, '.jsonl'), retry = 0, seededAt=0;
+  const labels=new Map();
   for (const line of readLogLines(file)) {
-    if (agent === 'codex' && !['session_meta','turn_context','token_count'].some(type => line.includes(type))) continue;
-    if (['claude','workbuddy','codebuddy'].includes(agent) && !line.includes('usage')) continue;
+    if (agent === 'codex' && !['session_meta','turn_context','token_count','user_message'].some(type => line.includes(type))) continue;
+    if (['claude','workbuddy','codebuddy'].includes(agent) && !['usage','user','title','summary'].some(k=>line.includes(k))) continue;
     let e; try { e = JSON.parse(line); } catch { continue; }
     const p = e.payload || {};
     if (agent === 'codex' && e.type === 'session_meta') { id = p.id || id; cwd = p.cwd || cwd; }
     if (agent === 'codex' && e.type === 'turn_context') { model = p.model || model; cwd = p.cwd || cwd; }
-    if (agent === 'dsh' && e.type === 'session') { id = e.id || id; cwd = e.cwd || cwd; }
+    if (agent === 'dsh' && e.type === 'session') { id = e.id || id; cwd = e.cwd || cwd; seededAt=e.isSeeded ? toEpoch(e.createdAt) : 0; }
     if (agent === 'dsh' && e.type === 'request/header') model = e.data?.header?.config?.model || model;
-    if (agent === 'dsh' && e.type === 'session/end-seed') { out.clear(); sessionMap.clear(); }
+    if (agent === 'dsh' && e.type === 'session/end-seed' && e.data?.inherited === true) { out.clear(); sessionMap.clear(); }
     if (agent === 'dsh' && e.type === 'llm/retry-started') retry++;
+    const labelId=e.sessionId || id;
+    const explicit=e.customTitle || e.title || (e.type==='custom-title' ? e.customTitle : e.type==='summary' ? e.summary : e.type==='session/title' ? e.data?.title : '');
+    if (typeof explicit==='string' && explicit.trim()) labels.set(labelId,{title:explicit.trim(),priority:2});
+    if (!labels.has(labelId)) {
+      let content=e.type==='user' ? e.message?.content : e.type==='message' && e.role==='user' ? e.content : agent==='codex' && p.type==='user_message' ? p.message : e.type==='user/message' ? e.data?.message?.content : '';
+      if(Array.isArray(content)) content=content.filter(x=>x.type==='text').map(x=>x.text || '').join(' ');
+      if(typeof content==='string' && content.trim()) labels.set(labelId,{title:'首条提问：'+content.replace(/\s+/g,' ').trim().slice(0,120),priority:1});
+    }
     let u, key, inclusive = false;
     if (agent === 'zcode' && e.type === 'model_io') {
       if (!e.response?.usage) continue;
@@ -413,10 +423,10 @@ function parseAgentFile(file, agent) {
       key = (e.sessionId || id) + ':' + (e.eventId || e.id || out.size);
     }
     const t = toEpoch(e.timestamp ?? e.time ?? e.completedAt ?? e.startedAt);
-    if (t <= 0) continue;
+    if (t <= 0 || agent==='dsh' && seededAt && t<seededAt) continue;
     const sid = e.sessionId || id;
     cwd = e.cwd || cwd;
-    sessionMap.set(sid, { id: sid, cwd, title: e.title || '', tool: agent, createdAt: t, updatedAt: t });
+    sessionMap.set(sid, { id: sid, cwd, title: labels.get(sid)?.title || '', tool: agent, createdAt: t, updatedAt: t });
     const r = tokenCount(u.inputCacheRead ?? u.cache_read_input_tokens ?? u.cached_input_tokens ?? u.cacheReadTokens);
     const c = tokenCount(u.inputCacheCreation ?? u.cache_creation_input_tokens ?? u.cache_write_input_tokens ?? u.cacheWriteTokens);
     const input = tokenCount(u.inputOther ?? u.input_tokens ?? u.inputTokens);
@@ -431,6 +441,7 @@ function parseAgentFile(file, agent) {
     }
     out.set(key, record);
   }
+  for(const session of sessionMap.values()) session.title=labels.get(session.id)?.title || session.title;
   return { sessions: [...sessionMap.values()], records: [...out.values()] };
 }
 // 按块读取大型 JSONL，避免 ZCode model-io 日志占满内存。
@@ -440,7 +451,16 @@ function* readLogLines(file) {
     if (file.endsWith('.zstd')) {
       const decompress = require('node:zlib').zstdDecompressSync;
       if (!decompress) throw new Error('当前 Node.js 不支持 Zstandard 解压，请升级到 22.15+ 或使用桌面版');
-      yield* decompress(fs.readFileSync(file), { maxOutputLength: 256 * 1024 * 1024 }).toString('utf8').split('\n');
+      const compressed=fs.readFileSync(file),chunks=[];
+      let offset=0,total=0;
+      while(offset<compressed.length) {
+        const result=decompress(compressed.subarray(offset),{info:true,maxOutputLength:256*1024*1024-total});
+        const consumed=result.engine.bytesWritten;
+        if(!consumed) throw new Error('Zstandard 解压未推进');
+        offset+=consumed;total+=result.buffer.length;chunks.push(result.buffer);
+        if(total>=256*1024*1024 && offset<compressed.length) throw new Error('解压内容超过 256 MiB');
+      }
+      yield* Buffer.concat(chunks).toString('utf8').split('\n');
       return;
     }
     fd = fs.openSync(file, 'r');
@@ -497,6 +517,9 @@ function appendAgentRecords(data, agent, sessions, records, eventIds) {
     const sessionIndices = new Map();
     for (const r of data.records) {
       const eventKey = agent + ':' + r.key;
+      const metadata=data.sessions.find(s=>s.id===r.sid);
+      const existingSession=sessions.find(s=>s.tool===agent && s.id===r.sid);
+      if(metadata?.title && existingSession && (!existingSession.title || existingSession.title.startsWith('首条提问：'))) existingSession.title=metadata.title;
       const existing = eventIds.get(eventKey);
       if (existing !== undefined) {
         const old = records[existing];
@@ -535,6 +558,41 @@ function finalizeAgentRecords(records) {
     delete rec._inclusive; delete rec.sid; delete rec.key;
   }
   for (let i=records.length-1;i>=0;i--) if (records[i].tool === 'codex' && !['i','o','r','c'].some(k=>records[i][k])) records.splice(i,1);
+}
+function enrichSessionTitles(sessions,warnings) {
+  const sources=new Map();
+  for(const monitor of CFG.monitors || []) {
+    if(!monitor.enabled || !['codex','workbuddy','codebuddy'].includes(monitor.agent)) continue;
+    let dir=path.resolve(monitor.root);
+    for(let depth=0;depth<5;depth++) {
+      let files=[];try {files=fs.readdirSync(dir);} catch {}
+      const file=monitor.agent==='codex' ? files.filter(n=>/^state_\d+\.sqlite$/.test(n)).sort((a,b)=>Number(b.match(/\d+/)[0])-Number(a.match(/\d+/)[0]))[0] : files.find(n=>n===(monitor.agent==='workbuddy'?'workbuddy.db':'codebuddy.db'));
+      if(file) {sources.set(monitor.agent+':'+path.join(dir,file),{agent:monitor.agent,root:monitor.root,file:path.join(dir,file)});break;}
+      const parent=path.dirname(dir);if(parent===dir) break;dir=parent;
+    }
+  }
+  if(!DatabaseSync) return;
+  for(const source of sources.values()) {
+    let db;
+    try {
+      db=new DatabaseSync(source.file,{readOnly:true});
+      const table=source.agent==='codex'?'threads':'sessions';
+      const columns=db.prepare(`PRAGMA table_info(${table})`).all().map(x=>x.name);
+      const expression=columns.includes('custom_title') ? "COALESCE(NULLIF(TRIM(custom_title),''),title)" : 'title';
+      const first=columns.includes('first_user_message')?'first_user_message':'NULL';
+      const nickname=columns.includes('agent_nickname')?'agent_nickname':'NULL';
+      const rows=db.prepare(`SELECT id,${expression} AS title,${first} AS first,${nickname} AS nickname FROM ${table}`).all();
+      const metadata=new Map(rows.map(r=>[r.id,r]));
+      for(const session of sessions) {
+        if(session.tool!==source.agent) continue;
+        const row=metadata.get(session.id);if(!row) continue;
+        if(typeof row.title==='string' && row.title.trim()) session.title=row.title.trim();
+        else if(!session.title && typeof row.first==='string' && row.first.trim()) session.title='首条提问：'+row.first.replace(/\s+/g,' ').trim().slice(0,120);
+        else if(!session.title && typeof row.nickname==='string' && row.nickname.trim()) session.title='子 Agent：'+row.nickname.trim();
+      }
+    } catch(error) {warnings.push({...source,error:'会话标题读取失败：'+error.message});}
+    finally {if(db) db.close();}
+  }
 }
 function parseZcodeDatabase(file) {
   if (!DatabaseSync) throw new Error('读取 ZCode 数据库需要 Node.js 22.13+，或选择 CLI rollout JSONL 目录');
