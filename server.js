@@ -12,6 +12,8 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+let DatabaseSync = null;
+try { DatabaseSync = require('node:sqlite').DatabaseSync; } catch { }
 
 // SEA 单文件模式检测（KimiMonitor.exe）：资源内嵌、数据/配置写在 exe 旁边
 let SEA = null;
@@ -32,6 +34,7 @@ let CONFIG_DIR;
 if (isSEA) CONFIG_DIR = path.dirname(process.execPath);
 else if (process.platform === 'darwin') CONFIG_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'KimiMonitor');
 else CONFIG_DIR = __dirname;
+if (process.env.KIMI_MONITOR_CONFIG_DIR) CONFIG_DIR = path.resolve(process.env.KIMI_MONITOR_CONFIG_DIR);
 try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); } catch { }
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -44,8 +47,29 @@ const PORT = Number(
 );
 
 // ---------- 配置 ----------
-const CFG = { roots: [], setupDone: false, shortcut: false };
+const CFG = { roots: [], setupDone: false, shortcut: false, monitors: null, models: [] };
 const DEFAULT_ROOT = path.join(HOME, '.kimi-code', 'sessions');
+// tool 是产品来源，a 仍表示原日志中的子 agent，二者不能混用。
+const AGENTS = [
+  ['kimi', 'Kimi Code', '.kimi-code/sessions', 'native'],
+  ['claude', 'Claude Code', '.claude/projects', 'native'],
+  ['codex', 'Codex', '.codex/sessions', 'native'],
+  ['workbuddy', 'WorkBuddy', '.workbuddy/projects', 'native'],
+  ['codebuddy', 'CodeBuddy', '.codebuddy/projects', 'compatible'],
+  ['zcode', 'ZCode', DatabaseSync ? '.zcode/cli/db' : '.zcode/cli/rollout', 'native'],
+  ['doubao', 'Doubao', '', 'import'],
+  ['trae', 'Trae', '', 'import'],
+  ['dsh', 'DeepSeek Harness', '.dsh/sessions', 'native'],
+].map(([id, name, dir, support]) => ({ id, name, support, defaultRoot: dir ? path.join(HOME, dir) : '' }));
+function validMonitors(monitors) {
+  return Array.isArray(monitors) && monitors.every(m => m && AGENTS.some(a => a.id === m.agent) &&
+    typeof m.root === 'string' && typeof m.enabled === 'boolean');
+}
+function normalizeMonitors(monitors) {
+  const seen = new Set();
+  return monitors.map(m => ({ agent: m.agent, root: m.root.trim() ? path.normalize(m.root.trim()) : '', enabled: m.enabled }))
+    .filter(m => { const key = m.agent + ':' + (process.platform === 'win32' ? m.root.toLowerCase() : m.root); if (seen.has(key)) return false; seen.add(key); return true; });
+}
 function loadConfig() {
   try {
     const j = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
@@ -53,15 +77,17 @@ function loadConfig() {
     if (typeof j.setupDone === 'boolean') CFG.setupDone = j.setupDone;
     else if (CFG.roots.length) CFG.setupDone = true; // 旧版配置已选过目录，视为完成引导
     if (typeof j.shortcut === 'boolean') CFG.shortcut = j.shortcut;
+    if (validMonitors(j.monitors)) CFG.monitors = normalizeMonitors(j.monitors);
+    if (Array.isArray(j.models) && j.models.every(m => typeof m === 'string')) CFG.models = j.models;
   } catch { }
-  if (!CFG.roots.length) {
+  if (!CFG.roots.length && CFG.monitors === null && !CFG.setupDone) {
     if (fs.existsSync(DEFAULT_ROOT)) CFG.roots.push(DEFAULT_ROOT); // 首次运行自动使用本机默认目录
   }
   CFG.roots = [...new Set(CFG.roots.map(p => path.normalize(String(p).trim())).filter(Boolean))];
 }
 loadConfig();
 function saveConfig() {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify({ port: PORT, roots: CFG.roots, setupDone: !!CFG.setupDone, shortcut: !!CFG.shortcut }, null, 2)); } catch { }
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ port: PORT, ...CFG }, null, 2));
 }
 
 // 单文件 exe（SEA）模式下首次运行自动创建桌面快捷方式（仅 Windows；由 config.json 的 shortcut 标记保证只创建一次）
@@ -80,7 +106,7 @@ function ensureWinShortcut() {
 }
 
 // ---------- 关闭 Edge 应用窗口（按页面标题匹配，WM_CLOSE 只关本应用窗口，不影响其他 Edge 标签） ----------
-const APP_TITLE = 'Kimi Code 用量监控';
+const APP_TITLE = 'Agent 用量监控';
 const WIN32_CLOSE_CS = "using System;using System.Runtime.InteropServices;using System.Text;public class Win32Close{public delegate bool EnumProc(IntPtr h,IntPtr l);[DllImport(\"user32.dll\")]public static extern bool EnumWindows(EnumProc cb,IntPtr l);[DllImport(\"user32.dll\")]public static extern int GetWindowText(IntPtr h,StringBuilder t,int n);[DllImport(\"user32.dll\")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);[DllImport(\"user32.dll\")]public static extern bool IsWindowVisible(IntPtr h);public static void CloseByTitle(string title){EnumWindows(delegate(IntPtr h,IntPtr l){if(IsWindowVisible(h)){var sb=new StringBuilder(256);GetWindowText(h,sb,256);if(sb.ToString().Contains(title))PostMessage(h,0x0010,IntPtr.Zero,IntPtr.Zero);}return true;},IntPtr.Zero);}}";
 function closeAppWindows() {
   if (process.platform !== 'win32') return;
@@ -289,8 +315,213 @@ function scan() {
   const sessions = [];
   const records = [];
   for (const root of CFG.roots) scanRoot(root, sessions, records, seen, seenSessions);
+  for (const s of sessions) s.tool = 'kimi';
+  for (const r of records) r.tool = 'kimi';
+  const eventIds = new Set();
+  const warnings = [];
+  for (const monitor of CFG.monitors || []) {
+    if (!monitor.enabled || !monitor.root) continue;
+    if (monitor.agent === 'kimi') {
+      const si = sessions.length, ri = records.length;
+      scanRoot(monitor.root, sessions, records, seen, seenSessions);
+      for (const s of sessions.slice(si)) s.tool = 'kimi';
+      for (const r of records.slice(ri)) r.tool = 'kimi';
+    } else {
+      try { scanAgent(monitor, sessions, records, seen, eventIds); }
+      catch (e) { warnings.push({agent:monitor.agent,root:monitor.root,error:String(e.message || e)}); }
+    }
+  }
+  const availableModels = [...new Set(records.map(r => r.m))].sort();
+  if (CFG.models.length) {
+    const allowed = new Set(CFG.models);
+    for (let n = records.length - 1; n >= 0; n--) if (!allowed.has(records[n].m)) records.splice(n, 1);
+  }
   for (const k of wireCache.keys()) if (!seen.has(k)) wireCache.delete(k);
-  return { sessions, records };
+  return { sessions, records, availableModels, warnings };
+}
+
+// 只解析明确的用量事件；不会把聊天文字或会话数量估算为 token。
+function parseAgentFile(file, agent) {
+  const sessionMap = new Map(), out = new Map();
+  let model = 'unknown', cwd = '', id = path.basename(file, '.jsonl'), previous = null, retry = 0;
+  for (const line of readLogLines(file)) {
+    if (agent === 'codex' && !['session_meta','turn_context','token_count'].some(type => line.includes(type))) continue;
+    if (['claude','workbuddy','codebuddy'].includes(agent) && !line.includes('usage')) continue;
+    let e; try { e = JSON.parse(line); } catch { continue; }
+    const p = e.payload || {};
+    if (agent === 'codex' && e.type === 'session_meta') { id = p.id || id; cwd = p.cwd || cwd; }
+    if (agent === 'codex' && e.type === 'turn_context') { model = p.model || model; cwd = p.cwd || cwd; }
+    if (agent === 'dsh' && e.type === 'session') { id = e.id || id; cwd = e.cwd || cwd; }
+    if (agent === 'dsh' && e.type === 'request/header') model = e.data?.header?.config?.model || model;
+    if (agent === 'dsh' && e.type === 'session/end-seed') { out.clear(); sessionMap.clear(); }
+    if (agent === 'dsh' && e.type === 'llm/retry-started') retry++;
+    let u, key, inclusive = false;
+    if (agent === 'zcode' && e.type === 'model_io') {
+      if (!e.response?.usage) continue;
+      u = e.response.providerMetadata?.anthropic?.usage || e.response.usage;
+      inclusive = !e.response.providerMetadata?.anthropic?.usage;
+      model = e.response.modelId || e.model?.modelId || 'unknown';
+      key = (e.sessionId || id) + ':' + (e.response.responseId || `${e.requestId || out.size}:${e.attempt || 0}`);
+    } else if (agent === 'dsh' && ['assistant/message','assistant/attempt'].includes(e.type)) {
+      const d = e.data || {};
+      const samples = (d.stream || []).filter(x => x.type === 'chunk' && x.chunk?.type === 'usage');
+      u = d.usage || samples[samples.length - 1]?.chunk.usage;
+      if (!u) continue;
+      model = d.message?.source?.model || model;
+      key = id + ':' + d.turn + ':' + d.step + ':' + retry;
+    } else if (agent === 'codex') {
+      if (e.type !== 'event_msg' || p.type !== 'token_count' || !p.info?.total_token_usage) continue;
+      const total = p.info.total_token_usage;
+      const fields = ['input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_input_tokens'];
+      const counts = fields.map(k => tokenCount(total[k]));
+      const delta = counts.map((n, i) => previous ? Math.max(0, n - previous[i]) : n);
+      // 相同累计值（包括限额刷新）不产生新调用；累计值回退也不重复统计。
+      if (previous && counts.every((n, i) => n <= previous[i])) continue;
+      previous = counts;
+      if (!delta.some(Boolean)) continue;
+      u = { input_tokens: delta[0], output_tokens: delta[1], cached_input_tokens: delta[2], cache_write_input_tokens: delta[3] };
+      inclusive = true;
+      key = id + ':' + counts.join(':');
+    } else if (['claude', 'workbuddy', 'codebuddy'].includes(agent)) {
+      if (!(agent === 'claude' ? e.type === 'assistant' : ['assistant', 'function_call', 'message'].includes(e.type)) || !e.message?.usage) continue;
+      if (e.isApiErrorMessage || e.message.model === '<synthetic>') continue;
+      u = e.message.usage;
+      model = e.message.model || e.providerData?.model || model;
+      key = (e.sessionId || id) + ':' + (e.message.id || e.providerData?.messageId || e.requestId || e.uuid || e.id || out.size);
+      inclusive = agent !== 'claude' && !!e.providerData?.rawUsage;
+    } else {
+      if (e.type !== 'usage.record' || !e.usage) continue;
+      u = e.usage; model = e.model || 'unknown';
+      key = (e.sessionId || id) + ':' + (e.eventId || e.id || out.size);
+    }
+    const t = toEpoch(e.timestamp ?? e.time ?? e.completedAt ?? e.startedAt);
+    if (t <= 0) continue;
+    const sid = e.sessionId || id;
+    cwd = e.cwd || cwd;
+    sessionMap.set(sid, { id: sid, cwd, title: e.title || '', tool: agent, createdAt: t, updatedAt: t });
+    const r = tokenCount(u.inputCacheRead ?? u.cache_read_input_tokens ?? u.cached_input_tokens ?? u.cacheReadTokens);
+    const c = tokenCount(u.inputCacheCreation ?? u.cache_creation_input_tokens ?? u.cache_write_input_tokens ?? u.cacheWriteTokens);
+    const input = tokenCount(u.inputOther ?? u.input_tokens ?? u.inputTokens);
+    const record = { sid, key, t, m: model, tool: agent, a: e.agentId || 'main',
+      i: inclusive ? Math.max(0, input - r - c) : input,
+      o: tokenCount(u.output ?? u.output_tokens ?? u.outputTokens), r, c };
+    const existing = out.get(key);
+    if (existing && agent !== 'dsh') for (const field of ['i', 'o', 'r', 'c']) record[field] = Math.max(record[field], existing[field]);
+    out.set(key, record);
+  }
+  return { sessions: [...sessionMap.values()], records: [...out.values()] };
+}
+// 按块读取大型 JSONL，避免 ZCode model-io 日志占满内存。
+function* readLogLines(file) {
+  let fd;
+  try {
+    if (file.endsWith('.zstd')) {
+      const decompress = require('node:zlib').zstdDecompressSync;
+      if (!decompress) return;
+      yield* decompress(fs.readFileSync(file), { maxOutputLength: 256 * 1024 * 1024 }).toString('utf8').split('\n');
+      return;
+    }
+    fd = fs.openSync(file, 'r');
+    const decoder = new (require('node:string_decoder').StringDecoder)('utf8');
+    const buffer = Buffer.alloc(64 * 1024);
+    let pending = [], n;
+    while ((n = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      const chunk = decoder.write(buffer.subarray(0, n));
+      let start = 0, end;
+      while ((end = chunk.indexOf('\n', start)) >= 0) {
+        pending.push(chunk.slice(start, end)); yield pending.join(''); pending = []; start = end + 1;
+      }
+      if (start < chunk.length) pending.push(chunk.slice(start));
+    }
+    pending.push(decoder.end()); const tail = pending.join(''); if (tail.trim()) yield tail;
+  } catch { /* 锁定、压缩损坏或未写完的文件不阻断其他来源 */ }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+function scanAgent(monitor, sessions, records, seen, eventIds) {
+  const database = path.join(monitor.root, 'db.sqlite');
+  if (monitor.agent === 'zcode' && fs.existsSync(database)) {
+    const parsed = parseZcodeDatabase(database);
+    appendAgentRecords(parsed, monitor.agent, sessions, records, eventIds);
+    return;
+  }
+  const files = [], visited = new Set();
+  function walk(dir, depth = 0) {
+    if (depth > 12) return;
+    let real; try { real = fs.realpathSync(dir); } catch { return; }
+    if (visited.has(real)) return; visited.add(real);
+    for (const e of listDir(real)) {
+      const p = path.join(real, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (e.isFile() && (e.name.endsWith('.jsonl') || monitor.agent === 'dsh' && e.name.endsWith('.jsonl.zstd'))) files.push(p);
+    }
+  }
+  walk(monitor.root);
+  // DSH 保留历史格式代，只读取每个 session 目录中的最高代。
+  const selected = monitor.agent === 'dsh' ? selectDshFiles(files) : files;
+  for (const file of selected.sort()) {
+    const cacheKey = monitor.agent + ':' + file;
+    seen.add(cacheKey);
+    let st; try { st = fs.statSync(file); } catch { continue; }
+    let hit = wireCache.get(cacheKey);
+    if (!hit || hit.mtimeMs !== st.mtimeMs || hit.size !== st.size) {
+      hit = { mtimeMs: st.mtimeMs, size: st.size, data: parseAgentFile(file, monitor.agent) };
+      wireCache.set(cacheKey, hit);
+    }
+    appendAgentRecords(hit.data, monitor.agent, sessions, records, eventIds);
+  }
+}
+function appendAgentRecords(data, agent, sessions, records, eventIds) {
+    const sessionIndices = new Map();
+    for (const r of data.records) {
+      const eventKey = agent + ':' + r.key;
+      if (eventIds.has(eventKey)) continue;
+      eventIds.add(eventKey);
+      let si = sessionIndices.get(r.sid);
+      if (si === undefined) {
+        si = sessions.findIndex(s => s.tool === agent && s.id === r.sid);
+        if (si < 0) { si = sessions.length; sessions.push(data.sessions.find(s => s.id === r.sid)); }
+        sessionIndices.set(r.sid, si);
+      }
+      const { sid, key, ...rec } = r;
+      records.push({ s: si, ...rec });
+    }
+}
+function parseZcodeDatabase(file) {
+  if (!DatabaseSync) throw new Error('读取 ZCode 数据库需要 Node.js 22.13+，或选择 CLI rollout JSONL 目录');
+  const db = new DatabaseSync(file, {readOnly:true});
+  try {
+    const rows = db.prepare(`SELECT u.id, u.session_id, u.model_id, u.agent, u.started_at,
+      u.completed_at, u.input_tokens, u.output_tokens, u.cache_read_input_tokens,
+      u.cache_creation_input_tokens, s.directory AS cwd, s.title
+      FROM model_usage u LEFT JOIN session s ON s.id = u.session_id
+      WHERE u.input_tokens > 0 OR u.output_tokens > 0 OR u.cache_read_input_tokens > 0 OR u.cache_creation_input_tokens > 0
+      ORDER BY u.started_at, u.id`).all();
+    const sessionMap = new Map(), records = [];
+    for (const row of rows) {
+      const t = toEpoch(row.completed_at || row.started_at); if (t <= 0) continue;
+      const sid = row.session_id;
+      sessionMap.set(sid, {id:sid,cwd:row.cwd || '',title:row.title || '',tool:'zcode',createdAt:t,updatedAt:t});
+      records.push({sid,key:sid+':'+row.id,t,m:row.model_id || 'unknown',tool:'zcode',a:row.agent || 'main',
+        i:Math.max(0,tokenCount(row.input_tokens)-tokenCount(row.cache_read_input_tokens)-tokenCount(row.cache_creation_input_tokens)),o:tokenCount(row.output_tokens),r:tokenCount(row.cache_read_input_tokens),c:tokenCount(row.cache_creation_input_tokens)});
+    }
+    return {sessions:[...sessionMap.values()],records};
+  } finally { db.close(); }
+}
+function selectDshFiles(files) {
+  const generations = new Map(), other = [];
+  for (const file of files) {
+    const match = path.basename(file).match(/^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/);
+    if (!match) { other.push(file); continue; }
+    const key = path.dirname(file), version = Number(match[1] || 0);
+    const old = generations.get(key);
+    if (!old || version > old.version) generations.set(key, {file,version});
+  }
+  return [...other, ...[...generations.values()].map(v => v.file)];
+}
+
+function monitoringData() {
+  return { agents: AGENTS.map(a => ({ ...a, detected: !!a.defaultRoot && fs.existsSync(a.defaultRoot), compressedLogs: a.id === 'dsh' ? typeof require('node:zlib').zstdDecompressSync === 'function' : undefined })),
+    monitors: (CFG.monitors || CFG.roots.map(root => ({ agent: 'kimi', root, enabled: true }))).map(m => ({ ...m, exists: !!m.root && fs.existsSync(m.root) })), models: CFG.models };
 }
 
 function probeRoot(root) {
@@ -329,7 +560,7 @@ const server = http.createServer((req, res) => {
     try {
       const d = getData();
       const dp = getDefaultProbe();
-      body = JSON.stringify({ generatedAt: Date.now(), roots: CFG.roots, setupDone: !!CFG.setupDone, defaultRoot: dp.root, defaultOk: dp.ok, defaultStats: dp.stats, sessions: d.sessions, records: d.records });
+      body = JSON.stringify({ generatedAt: Date.now(), roots: CFG.roots, setupDone: !!CFG.setupDone, defaultRoot: dp.root, defaultOk: dp.ok, defaultStats: dp.stats, ...monitoringData(), sessions: d.sessions, records: d.records, availableModels: d.availableModels, warnings: d.warnings });
     } catch (e) {
       body = JSON.stringify({ generatedAt: Date.now(), roots: CFG.roots, setupDone: !!CFG.setupDone, sessions: [], records: [], error: String(e && e.message || e) });
     }
@@ -353,26 +584,43 @@ const server = http.createServer((req, res) => {
     });
     req.on('end', () => {
       if (tooLarge) return;
-      let roots, setupDone;
+      let roots, setupDone, monitors, models;
       try {
         const j = JSON.parse(raw);
-        if (!j || !Array.isArray(j.roots) || !j.roots.every(p => typeof p === 'string') ||
+        if (!j || (j.roots === undefined && j.monitors === undefined) ||
+            (j.roots !== undefined && (!Array.isArray(j.roots) || !j.roots.every(p => typeof p === 'string'))) ||
+            (j.monitors !== undefined && !validMonitors(j.monitors)) ||
+            (j.models !== undefined && (!Array.isArray(j.models) || !j.models.every(m => typeof m === 'string'))) ||
             (j.setupDone !== undefined && typeof j.setupDone !== 'boolean')) throw new Error('invalid config');
-        roots = j.roots;
+        roots = j.roots || [];
+        monitors = j.monitors;
+        models = j.models;
         if (typeof j.setupDone === 'boolean') setupDone = j.setupDone;
       } catch {
-        json(res, { error: '配置需要 roots 字符串数组及可选的 setupDone 布尔值' }, 400);
+        json(res, { error: '需要合法的 roots 或 monitors，以及可选的 models 字符串数组、setupDone 布尔值' }, 400);
         return;
       }
-      roots = [...new Set(roots.map(p => path.normalize(String(p).trim())).filter(Boolean))];
+      roots = [...new Set(roots.map(p => p.trim()).filter(Boolean).map(p => path.normalize(p)))];
+      if (monitors !== undefined) {
+        for (const m of monitors) {
+          if (!m.enabled) continue;
+          try {
+            if (!m.root.trim() || !fs.statSync(m.root.trim()).isDirectory()) throw new Error('invalid directory');
+            fs.accessSync(m.root.trim(), fs.constants.R_OK);
+          } catch { json(res, { error: '已启用的监测目录不存在或无法读取：' + m.root }, 400); return; }
+        }
+      }
       const stats = roots.map(probeRoot);
+      const previousConfig = { ...CFG };
       CFG.roots = roots.filter((_, i) => stats[i].ok);
+      CFG.monitors = monitors === undefined ? null : normalizeMonitors(monitors);
+      if (models !== undefined) CFG.models = [...new Set(models.map(m => m.trim()).filter(Boolean))];
       if (typeof setupDone === 'boolean') CFG.setupDone = setupDone;
       else CFG.setupDone = CFG.setupDone || CFG.roots.length > 0;
-      saveConfig();
+      try { saveConfig(); } catch { Object.assign(CFG, previousConfig); json(res, { error: '配置保存失败，请检查配置目录权限' }, 500); return; }
       wireCache.clear(); stateCache.clear(); indexCache.clear(); defaultProbe = null;
       lastScan = { at: 0, data: null };
-      json(res, { ok: true, roots: CFG.roots, setupDone: !!CFG.setupDone, stats });
+      json(res, { ok: true, roots: CFG.roots, setupDone: !!CFG.setupDone, stats, ...monitoringData() });
     });
     return;
   }
@@ -438,7 +686,8 @@ server.on('error', e => {
 server.listen(PORT, '127.0.0.1', () => {
   try { if (process.platform === 'win32') fs.writeFileSync(path.join(CONFIG_DIR, 'port.txt'), String(PORT)); } catch { }
   log(`[kimi-usage-monitor] http://127.0.0.1:${PORT}`);
-  log(`[kimi-usage-monitor] 数据目录: ${CFG.roots.join(' ; ') || '(未配置，请打开页面右上角"数据目录"添加)'}`);
+  const activeRoots = [...CFG.roots, ...(CFG.monitors || []).filter(m => m.enabled).map(m => m.root)];
+  log(`[kimi-usage-monitor] 数据目录: ${activeRoots.join(' ; ') || '(未配置，请打开页面右上角"设置"添加)'}`);
   ensureWinShortcut();
   startTray();
   if (isSEA && !process.env.KIMI_NO_OPEN) openBrowser(`http://127.0.0.1:${PORT}/`);
