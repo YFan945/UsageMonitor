@@ -126,7 +126,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // ---------- 4. Windows 绿色版 zip ----------
   log('打包绿色版 zip...');
   {
-    const stage = path.join(os.tmpdir(), 'kimi-monitor-portable');
+    const stage = path.join(os.tmpdir(), 'agent-monitor-portable');
     fs.rmSync(stage, { recursive: true, force: true });
     fs.mkdirSync(path.join(stage, 'runtime'), { recursive: true });
     fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(stage, 'server.js'));
@@ -171,7 +171,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     fs.copyFileSync(path.join(stage, 'node-darwin-x64'), path.join(app, 'Contents', 'Resources', 'bin', 'node-darwin-x64'));
     fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(app, 'Contents', 'Resources', 'app', 'server.js'));
     fs.cpSync(path.join(ROOT, 'public'), path.join(app, 'Contents', 'Resources', 'app', 'public'), { recursive: true });
-    fs.writeFileSync(path.join(app, 'Contents', 'MacOS', 'kimi-monitor'), `#!/bin/bash
+    fs.writeFileSync(path.join(app, 'Contents', 'MacOS', 'agent-monitor'), `#!/bin/bash
 # AgentMonitor — macOS 启动器：选择对应架构的 node 运行 server.js，并打开浏览器
 DIR="$(cd "$(dirname "$0")" && pwd)"
 RES="$DIR/../Resources"
@@ -193,10 +193,10 @@ open "http://127.0.0.1:$PORT/"
 <dict>
 \t<key>CFBundleName</key><string>AgentMonitor</string>
 \t<key>CFBundleDisplayName</key><string>AgentMonitor</string>
-\t<key>CFBundleIdentifier</key><string>com.yfan945.kimi-monitor</string>
+\t<key>CFBundleIdentifier</key><string>com.yfan945.agentmonitor.node</string>
 \t<key>CFBundleVersion</key><string>${VER}</string>
 \t<key>CFBundleShortVersionString</key><string>${VER}</string>
-\t<key>CFBundleExecutable</key><string>kimi-monitor</string>
+\t<key>CFBundleExecutable</key><string>agent-monitor</string>
 \t<key>CFBundleIconFile</key><string>icon.icns</string>
 \t<key>CFBundlePackageType</key><string>APPL</string>
 \t<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
