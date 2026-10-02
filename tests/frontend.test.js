@@ -136,19 +136,26 @@ test('饼图合并小占比和超过前 7 项的用量，总量不丢失且零�
 });
 
 
-test('模型颜色在新增、移除和刷新后稳定，排行饼图使用统一配色', () => {
+test('同厂商模型固定同色，别名与命名空间保持一致且不受旧配色缓存影响', () => {
   const values=new Map();
   const create=()=>{
-    const ctx=vm.createContext({localStorage:{getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)}});
+    const ctx=vm.createContext({document:{documentElement:{dataset:{theme:'light'}}},localStorage:{getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)}});
     vm.runInContext(html.slice(html.indexOf('const PALETTE ='),html.indexOf('// ---------- 格式化')),ctx);
     return ctx;
   };
   const ctx=create();
-  const red=vm.runInContext("modelColor('first')",ctx);assert.equal(red,'#ff5252');
-  vm.runInContext("modelColor('new'); categoryColor('projects','project');",ctx);
-  assert.equal(vm.runInContext("modelColor('first')",ctx),red);
-  assert.equal(vm.runInContext("modelColor('third')",ctx),'#ffdf00');
-  assert.equal(vm.runInContext("modelColor('first')",create()),red);
+  for (const [models,color] of [
+    [['gpt-5.5','openai/gpt-6-sol','codex-auto-review','o3'],'#1f1f1f'],
+    [['claude-opus-4','anthropic/claude-sonnet-4'],'#cc785c'],
+    [['deepseek-flash','deepseek/deepseek-v4-flash'],'#2243e6'],
+    [['kimi-code/k3','kimi-for-coding','moonshot-v1'],'#047AFE'],
+    [['GLM-5.3-Flash','z-ai/glm-5.3'],'#1c7ff8'],
+    [['qwen3.8-max','qwen/qwen3'],'#ff7018'],
+    [['mimo-v2.6-pro'],'#ff6900'],[['step-5-preview'],'#00F5E7'],
+    [['gemini-3-pro'],'#34A853'],[['minimax-m2.5'],'#EB3568'],[['unknown','agnes-2.5-flash'],'#9ca3af'],
+  ]) for (const model of models) assert.equal(vm.runInContext(`modelColor(${JSON.stringify(model)})`,ctx),color);
+  vm.runInContext("categoryColor('models','gpt-5.5'); categoryColor('projects','project');",ctx);
+  assert.equal(vm.runInContext("modelColor('gpt-5.5')",create()),'#1f1f1f');
   assert.match(html,/detailKind==='model' \? modelColor\(s.key\)/);
   assert.match(html,/outline:1px solid var\(--text\);outline-offset:-1px/);
 });
@@ -157,6 +164,19 @@ test('发布脚本只指向扩展仓库且不覆盖同名资产', () => {
   const build=fs.readFileSync(path.join(__dirname,'..','build.js'),'utf8');
   assert.match(build,/const REPO = 'YFan945\/UsageMonitor'/);
   assert.doesNotMatch(build,/--clobber/);
+});
+
+test('主题切换将 OpenAI 和 Agent 黑色替换为白色，其他厂商保持原色', () => {
+  const document = {documentElement:{dataset:{theme:'light'}}};
+  const ctx = vm.createContext({document, DATA:{agents:Array.from({length:10},(_,i)=>({id:String(i)}))}, localStorage:{getItem:()=>null,setItem(){}}});
+  vm.runInContext(html.slice(html.indexOf('const PALETTE ='),html.indexOf('// ---------- 格式化')),ctx);
+  assert.equal(vm.runInContext("modelColor('gpt-5.5')",ctx),'#1f1f1f');
+  document.documentElement.dataset.theme='dark';
+  assert.equal(vm.runInContext("modelColor('gpt-5.5')",ctx),'#ffffff');
+  assert.equal(vm.runInContext("agentColor('8')",ctx),'#ffffff');
+  assert.equal(vm.runInContext("modelColor('deepseek-flash')",ctx),'#2243e6');
+  document.documentElement.dataset.theme='light';
+  assert.equal(vm.runInContext("agentColor('8')",ctx),'#171717');
 });
 
 

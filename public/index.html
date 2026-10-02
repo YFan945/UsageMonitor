@@ -13,7 +13,7 @@
   --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#2a3140;
   --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --accent-soft:rgba(88,166,255,.16);
   --hover:rgba(255,255,255,.04); --tip-bg:rgba(13,17,23,.96); --empty:#30363d; --bar-hover:rgba(255,255,255,.28);
-  --c-out:#3fb950; --c-in:#58a6ff; --c-cc:#f0883e; --c-cr:#a371f7;
+  --c-out:#22c55e; --c-in:#3b82f6; --c-cc:#f97316; --c-cr:#a855f7;
   --hm1:#123156; --hm2:#1f6feb; --hm3:#5aa2ff; --hm4:#b3d4ff;
   color-scheme:dark;
 }
@@ -21,7 +21,7 @@ html[data-theme="light"]{
   --bg:#f6f8fa; --panel:#ffffff; --panel2:#eaeef2; --border:#d5dbe1;
   --text:#1f2328; --muted:#59636e; --accent:#0969da; --accent-soft:rgba(9,105,218,.12);
   --hover:rgba(0,0,0,.045); --tip-bg:rgba(255,255,255,.97); --empty:#d8dee4; --bar-hover:rgba(0,0,0,.35);
-  --c-out:#1a7f37; --c-in:#0969da; --c-cc:#bc4c00; --c-cr:#8250df;
+  --c-out:#22c55e; --c-in:#3b82f6; --c-cc:#f97316; --c-cr:#a855f7;
   --hm1:#dbe7fb; --hm2:#a8c8fa; --hm3:#5f9df6; --hm4:#1f6feb;
   color-scheme:light;
 }
@@ -64,10 +64,10 @@ select{background:var(--panel2);border:1px solid var(--border);border-radius:6px
 .bar>div{width:100%}
 .bar:hover{outline:1px solid var(--bar-hover)}
 .seg-out{background:var(--c-out)}.seg-in{background:var(--c-in)}.seg-cc{background:var(--c-cc)}.seg-cr{background:var(--c-cr)}
-.trend-area{display:flex;align-items:stretch}
-.y-axis{width:56px;flex:0 0 auto;position:relative;height:248px}
+.trend-area{--plot-height:240px;display:flex;align-items:stretch}
+.y-axis{width:56px;flex:0 0 auto;position:relative;height:var(--plot-height)}
 .y-axis span{position:absolute;right:10px;transform:translateY(50%);line-height:1;font-size:10px;color:var(--muted);white-space:nowrap}
-.bars{display:flex;align-items:flex-end;gap:3px;height:240px;padding-top:8px;background:repeating-linear-gradient(to top,var(--grid,rgba(128,128,128,.18)) 0,var(--grid,rgba(128,128,128,.18)) 1px,transparent 1px,transparent calc(240px/4))}
+.bars{display:flex;align-items:flex-end;gap:3px;height:var(--plot-height);background:repeating-linear-gradient(to top,var(--grid,rgba(128,128,128,.18)) 0,var(--grid,rgba(128,128,128,.18)) 1px,transparent 1px,transparent calc(var(--plot-height)/4))}
 .xlabels{position:relative;height:16px;margin-top:6px}
 .xlabels span{position:absolute;top:0;line-height:16px;color:var(--muted);font-size:10px;white-space:nowrap}
 .chart-inner.sparse .bars{justify-content:center}
@@ -326,8 +326,12 @@ let range = { start: null, end: null };   // null/null = 全部
 let curPreset = 'all';
 let fltModel = new Set(), fltProj = new Set(), fltAgent = new Set();
 let barMode = 'type';                     // 趋势图着色：type=按类型 model=按模型
-let modelOrder = [];                      // 全量模型列表；配色使用独立的持久化索引
+let modelOrder = [];                      // 全量模型列表；模型按厂商固定配色
 const PALETTE = ['#ff5252', '#f97316', '#ffdf00', '#22c55e', '#3b82f6', '#a855f7', '#06b6d4', '#ec4899', '#171717', '#9ca3af'];
+function paletteColor(index) {
+  const slot = index % PALETTE.length;
+  return slot === 8 && document.documentElement.dataset.theme === 'dark' ? '#ffffff' : PALETTE[slot];
+}
 let colorIds = [];
 try { const saved=JSON.parse(localStorage.getItem('usage-color-ids') || '[]'); if (Array.isArray(saved)) colorIds=[...new Set(saved.filter(x=>typeof x==='string'))]; } catch {}
 function categoryColor(kind,key) {
@@ -336,11 +340,41 @@ function categoryColor(kind,key) {
   if(index<0) {colorIds.push(id);index=colorIds.length-1;try {localStorage.setItem('usage-color-ids',JSON.stringify(colorIds));} catch {}}
   // 不同类别分别循环，新增项目不会改变旧项目的颜色。
   index=colorIds.slice(0,index+1).filter(x=>x.startsWith(kind+':')).length-1;
-  return PALETTE[index % PALETTE.length];
+  return paletteColor(index);
 }
-const modelColor = m => categoryColor('models',m);
+// Artificial Analysis Intelligence Index 的厂商图例色；未列出的厂商使用补充色。
+const MODEL_VENDOR_COLORS = {
+  openai:'#1f1f1f', anthropic:'#cc785c', google:'#34A853', meta:'#0089f4',
+  xai:'#736cd3', xiaomi:'#ff6900', alibaba:'#ff7018', zai:'#1c7ff8',
+  stepfun:'#00F5E7', kimi:'#047AFE', deepseek:'#2243e6', minimax:'#EB3568',
+  nvidia:'#76b900', mistral:'#fd6f00', tencent:'#00a6a6', bytedance:'#9b72cb', unknown:'#9ca3af',
+};
+function modelVendor(model) {
+  const name = String(model).toLowerCase().split('/').pop().replace(/[_\s]+/g,'-');
+  if (/^(gpt(?:-|\d)|chatgpt|codex(?:-|$)|o[1-9](?:-|$))/.test(name)) return 'openai';
+  if (/^(claude|opus|sonnet|haiku)(?:-|$)/.test(name)) return 'anthropic';
+  if (/^(gemini|gemma)(?:-|$)/.test(name)) return 'google';
+  if (/^(llama|meta-llama)(?:-|$)/.test(name)) return 'meta';
+  if (/^grok(?:-|$)/.test(name)) return 'xai';
+  if (/^mimo(?:-|$)/.test(name)) return 'xiaomi';
+  if (/^(qwen|qwq)/.test(name)) return 'alibaba';
+  if (/^(glm|chatglm)(?:-|$)/.test(name)) return 'zai';
+  if (/^step(?:-|\d)/.test(name)) return 'stepfun';
+  if (/^(kimi(?:-|$)|moonshot(?:-|$)|k[23](?:-|$))/.test(name)) return 'kimi';
+  if (/^deepseek(?:-|$)/.test(name)) return 'deepseek';
+  if (/^(minimax(?:-|$)|abab|m[12](?:\.|-|$))/.test(name)) return 'minimax';
+  if (/^(nemotron|nvidia)(?:-|$)/.test(name)) return 'nvidia';
+  if (/^(mistral|mixtral|magistral|codestral|devstral|ministral|pixtral|voxtral)(?:-|$)/.test(name)) return 'mistral';
+  if (/^(hunyuan|hy[34])/.test(name)) return 'tencent';
+  if (/^(doubao|seed)(?:-|$)/.test(name)) return 'bytedance';
+  return 'unknown';
+}
+function modelColor(model) {
+  const vendor = modelVendor(model);
+  return vendor === 'openai' && document.documentElement.dataset.theme === 'dark' ? '#ffffff' : MODEL_VENDOR_COLORS[vendor];
+}
 const agentName = id => (DATA.agents || []).find(a => a.id === id)?.name || id;
-const agentColor = id => PALETTE[Math.max(0, (DATA.agents || []).findIndex(a => a.id === id)) % PALETTE.length];
+const agentColor = id => paletteColor(Math.max(0, (DATA.agents || []).findIndex(a => a.id === id)));
 
 // ---------- 格式化 ----------
 const p2 = n => String(n).padStart(2, '0');
@@ -385,6 +419,7 @@ function resolvedTheme() {
 function applyTheme() {
   document.documentElement.dataset.theme = resolvedTheme();
   $('#settingsTheme').value = getThemeMode();
+  if (DATA.records.length) { render(); renderDetails(); }
 }
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (getThemeMode() === 'auto') applyTheme(); });
 
@@ -616,9 +651,10 @@ function stackedSegments(groups, heightOf, colorOf) {
   return groups.map(([key, value]) => {
     const color = colorOf(key);
     // 柱块从下往上堆叠；内侧底线标记与下方同色块的边界，不改变高度。
-    const boundary = color === previousColor ? `box-shadow:inset 0 -1px 0 ${color === '#171717' ? '#ffffff' : '#172033'};` : '';
+    const darkColor = color === '#171717' || color === '#1f1f1f' || color === '#2243e6';
+    const boundary = color === previousColor ? `box-shadow:inset 0 -1px 0 ${darkColor ? '#ffffff' : '#172033'};` : '';
     previousColor = color;
-    return `<div style="height:${heightOf(value)}%;background:${color};${boundary}${color === '#171717' ? 'outline:1px solid var(--text);outline-offset:-1px;' : ''}"></div>`;
+    return `<div style="height:${heightOf(value)}%;background:${color};${boundary}${darkColor ? 'outline:1px solid var(--text);outline-offset:-1px;' : ''}"></div>`;
   }).join('');
 }
 function drawCharts(recs, sumN) {
@@ -708,7 +744,7 @@ function drawCharts(recs, sumN) {
   const axisMax = step * 4;
   const h = v => (v / axisMax * 100);
   $('#yAxis').innerHTML = [0, 1, 2, 3, 4].map(i =>
-    `<span style="bottom:${i * 60}px">${i === 0 ? '0' : fmtTick(i * step)}</span>`).join('');
+    `<span style="bottom:${i * 25}%">${i === 0 ? '0' : fmtTick(i * step)}</span>`).join('');
   $('#bars').innerHTML = arr.map(([k, b]) => {
     const total = b.o + b.i + b.c + (incCr ? b.r : 0);
     let inner;

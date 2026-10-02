@@ -1,6 +1,6 @@
 {
   "name": "kimi-usage-monitor",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "基于 KimiMonitor 的多 Agent 本地用量监控，支持来源筛选、模型监测与主题设置",
   "main": "index.js",
   "scripts": {
