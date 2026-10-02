@@ -326,7 +326,7 @@ let range = { start: null, end: null };   // null/null = 全部
 let curPreset = 'all';
 let fltModel = new Set(), fltProj = new Set(), fltAgent = new Set();
 let barMode = 'type';                     // 趋势图着色：type=按类型 model=按模型
-let modelOrder = [];                      // 全量模型列表；模型按厂商固定配色
+let modelOrder = [];                      // 当前时段使用的模型列表；模型按厂商固定配色
 const PALETTE = ['#ff5252', '#f97316', '#ffdf00', '#22c55e', '#3b82f6', '#a855f7', '#06b6d4', '#ec4899', '#171717', '#9ca3af'];
 function paletteColor(index) {
   const slot = index % PALETTE.length;
@@ -435,8 +435,12 @@ function saveUI() {
 // ---------- 模型/项目多选筛选 ----------
 function panelIdOf(which) { return ({model:'#msModelPanel',proj:'#msProjPanel',agent:'#msAgentPanel'})[which]; }
 function refreshFilterOptions() {
+  updatePresetRange();
+  // 模型/项目列表跟随当前时段：时段内没有使用的不出现；Agent 列表始终显示全部启用来源。
+  const inRange = r => (!range.start || r.t >= range.start) && (!range.end || r.t < range.end);
   const models = new Map(), projs = new Map();
   for (const r of DATA.records) {
+    if (!inRange(r)) continue;
     models.set(r.m, (models.get(r.m) || 0) + 1);
     const cwd = (DATA.sessions[r.s] && DATA.sessions[r.s].cwd) || '(未知)';
     projs.set(cwd, (projs.get(cwd) || 0) + 1);
@@ -544,6 +548,7 @@ function applyPreset(p) {
   updatePresetRange(true);
   document.querySelectorAll('#presets .chip').forEach(c => c.classList.toggle('on', c.dataset.p === p));
   saveUI();
+  refreshFilterOptions();
   render();
 }
 $('#presets').addEventListener('click', e => { const c = e.target.closest('.chip'); if (c) applyPreset(c.dataset.p); });
@@ -554,6 +559,7 @@ $('#applyCustom').addEventListener('click', () => {
   curPreset = 'custom';
   document.querySelectorAll('#presets .chip').forEach(c => c.classList.remove('on'));
   saveUI();
+  refreshFilterOptions();
   render();
 });
 $('#gran').addEventListener('change', () => { saveUI(); render(); });
