@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本项目是基于 KimiMonitor 扩展的多 Agent 本地用量监控，独立版本从 v1.0.0 开始。Rust/Tauri 是当前桌面发行方式，Node 服务用于源码运行；两者共享前端，并保持解析和统计口径一致。Node/SEA 工具保留供开发使用，不沿用上游发行线作为本项目版本。
+AgentMonitor 与 KimiMonitor 均由 YFan945 开发，本项目提供多 Agent 本地用量监控，独立版本从 v1.0.0 开始。Rust/Tauri 是当前桌面发行方式，Node 服务用于源码运行；两者共享前端，并保持解析和统计口径一致。Node/SEA 工具保留供开发使用，两个项目分别管理版本和发行。
 
 - `server.js`：零运行时依赖的 CommonJS 服务，负责扫描、缓存、聚合和 HTTP API。
 - `public/`：共享前端；`index.html` 内含 HTML、CSS 和 JavaScript，另有 PWA manifest 与图标。
@@ -33,7 +33,7 @@ Windows SEA 打包后可设置 `$env:KIMI_MONITOR_TEST_EXE = (Resolve-Path dist/
 
 ## 提交与 Pull Request
 
-提交用中文描述具体改动，聚焦单一目的，例如 `修复：空时段趋势图显示`。版本发布使用本项目独立版本号，避免混入上游版本与过时发行说明。
+提交用中文描述具体改动，聚焦单一目的，例如 `修复：空时段趋势图显示`。版本发布使用本项目独立版本号，避免混入 KimiMonitor 的版本与过时发行说明。
 
 PR 应说明问题、行为变化、影响版本和验证结果；有关联 issue 时附链接，界面修改附截图。大改动及时更新 `README.md`，涉及版本更新时核对 npm、Cargo、Tauri 与安装器配置。
 
@@ -41,4 +41,4 @@ PR 应说明问题、行为变化、影响版本和验证结果；有关联 issu
 
 不要提交 `config.json`、`port.txt`、日志或真实会话数据；扫描保持只读，服务绑定 loopback。桌面版本须同步 npm、Cargo 与 Tauri 配置及其 lockfile。版本标签触发 Windows 与 macOS 双架构构建，成功后生成 Release 草稿；核对附件后再正式发布。手动构建仅生成 Artifacts。Node/SEA 工具的安装器配置独立，不能代替桌面版本配置。
 
-`node build.js --release` 仅向本项目仓库新建 Release 或添加资产，拒绝覆盖同名资产，仅在明确授权发布时执行。文档须说明实际接入范围，不能把标准日志导入描述为原生支持；区分自动化测试、构建成功与实机验收。README 面向使用者，RELEASE_NOTES 描述当前正式版本，移除失效下载链接和过时上游发行说明。
+`node build.js --release` 仅向本项目仓库新建 Release 或添加资产，拒绝覆盖同名资产，仅在明确授权发布时执行。文档须说明实际接入范围，不能把标准日志导入描述为原生支持；区分自动化测试、构建成功与实机验收。README 面向使用者，RELEASE_NOTES 描述当前正式版本，移除失效下载链接和过时的关联项目发行说明。

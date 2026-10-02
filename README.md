@@ -1,6 +1,8 @@
 # AgentMonitor
 
-基于 [KimiMonitor](https://github.com/YFan945/kimi-usage-monitor) 扩展的多 Agent 本地用量仪表盘。读取本机会话日志，查看模型调用次数、Token 趋势、活动热力图，以及模型、项目和 Agent 排行。
+AgentMonitor 是 YFan945 开发的多 Agent 本地用量仪表盘。读取本机会话日志，查看模型调用次数、Token 趋势、活动热力图，以及模型、项目和 Agent 排行。
+
+AgentMonitor 与 [KimiMonitor](https://github.com/YFan945/kimi-usage-monitor) 均由同一作者开发。KimiMonitor 聚焦 Kimi Code 用量统计；AgentMonitor 延续其仪表盘设计和本地统计能力，面向多种 Agent，使用独立的应用名称、配置目录和版本号。
 
 本项目独立版本从 **v1.0.0** 开始。桌面应用使用 Rust / Tauri，Windows 和 macOS 安装包均不需要另行安装 Node.js 或 Rust；开发者也可以运行共享界面的 Node 服务。
 
@@ -134,7 +136,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 GitHub Actions 的 Regression tests 校验 Node 18/24 和 Rust。Build desktop apps 支持手动构建；推送版本标签时构建 Windows 与 macOS 双架构安装包并生成 Release 草稿，核对后再正式发布。版本号须同步 package.json、package-lock.json、Cargo.toml、Cargo.lock 和 tauri.conf.json。
 
-build.js、sea-config.json 和 packaging/ 为保留的 Node / SEA 打包工具，与当前 Tauri 安装包分开。不要将其上游历史版本号或安装包链接用作本项目版本；辅助发布命令仅在明确授权时运行。
+build.js、sea-config.json 和 packaging/ 为保留的 Node / SEA 打包工具，与当前 Tauri 安装包分开。AgentMonitor 与 KimiMonitor 分别管理版本和下载入口；辅助发布命令仅在明确授权时运行。
 
 ## 常见问题
 
@@ -148,6 +150,6 @@ build.js、sea-config.json 和 packaging/ 为保留的 Node / SEA 打包工具�
 
 **为什么浏览器与桌面版数据不同？** 检查各自的监测配置、模型设置、时段和筛选条件；它们使用独立配置和 localStorage。
 
-## 来源与协议
+## 作者与协议
 
-本项目基于 [YFan945/kimi-usage-monitor](https://github.com/YFan945/kimi-usage-monitor) 扩展，保留原作者版权声明，采用 [MIT License](LICENSE)。
+作者：[YFan945](https://github.com/YFan945)。相关项目：[KimiMonitor](https://github.com/YFan945/kimi-usage-monitor)。本项目采用 [MIT License](LICENSE)。

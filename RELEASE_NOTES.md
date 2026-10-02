@@ -29,4 +29,4 @@ CodeBuddy 提供兼容日志适配，仍需核对具体版本。Doubao、Trae / 
 
 本版本通过 Node 18/24 回归检查、Rust 单元测试及 Windows、macOS 双架构构建。构建成功不等同于所有系统版本的安装、窗口和托盘实机验收。
 
-详细设置、目录与统计口径见 [README](https://github.com/YFan945/UsageMonitor#readme)。项目基于 KimiMonitor 扩展，使用 MIT License。
+详细设置、目录与统计口径见 [README](https://github.com/YFan945/UsageMonitor#readme)。AgentMonitor 与 KimiMonitor 均由 YFan945 开发，分别管理版本与发行。本项目使用 MIT License。
