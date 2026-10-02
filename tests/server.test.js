@@ -263,7 +263,7 @@ test('损坏压缩文件提示具体路径，其他文件继续统计，修复�
   const damaged=path.join(dRoot,'broken.jsonl.zstd');fs.writeFileSync(damaged,'broken');
   await request('/api/config',{roots:[],monitors:[{agent:'dsh',root:dRoot,enabled:true}],models:[]});
   const data=await (await request('/api/data')).json();
-  assert.equal(data.records.length,1);assert.equal(data.warnings.length,1);assert.equal(data.warnings[0].file,damaged);
+  assert.equal(data.records.length,1);assert.equal(data.warnings.length,1);assert.equal(data.warnings[0].file,fs.realpathSync(damaged));
   fs.unlinkSync(damaged);await request('/api/config',{roots:[],monitors:[{agent:'dsh',root:dRoot,enabled:true}],models:[]});
   assert.equal((await (await request('/api/data')).json()).warnings.length,0);
 });
