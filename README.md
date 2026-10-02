@@ -1,4 +1,4 @@
-# Agent 用量监控
+# AgentMonitor
 
 基于 [KimiMonitor](https://github.com/YFan945/kimi-usage-monitor) 扩展的多 Agent 本地用量仪表盘。读取本机会话日志，查看模型调用次数、Token 趋势、活动热力图，以及模型、项目和 Agent 排行。
 
@@ -8,10 +8,10 @@
 
 | 平台 | 下载 | 安装方式 |
 |---|---|---|
-| Windows x64 | [安装包](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/KimiMonitor_1.0.0_x64-setup.exe) | 运行安装器；缺少 WebView2 时按提示安装 |
-| macOS Apple Silicon / Intel | [双架构 DMG](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/KimiMonitor_1.0.0_universal.dmg) | 打开 DMG，将应用拖入“应用程序” |
+| Windows x64 | [安装包](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_x64-setup.exe) | 运行安装器；缺少 WebView2 时按提示安装 |
+| macOS Apple Silicon / Intel | [双架构 DMG](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_universal.dmg) | 打开 DMG，将应用拖入“应用程序” |
 
-完整版本说明见 [v1.0.0 Release](https://github.com/YFan945/UsageMonitor/releases/tag/v1.0.0)。macOS 包未签名或公证，首次打开可能受到系统拦截。应用安装名称为 KimiMonitor。
+完整版本说明见 [v1.0.0 Release](https://github.com/YFan945/UsageMonitor/releases/tag/v1.0.0)。macOS 包未签名或公证，首次打开可能受到系统拦截。应用安装名称为 AgentMonitor，macOS 应用为 AgentMonitor.app。
 
 ## 开始使用
 

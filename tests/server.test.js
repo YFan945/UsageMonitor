@@ -38,7 +38,7 @@ before(async () => {
   fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'kimi-monitor-test-'));
   root = path.join(fixture, 'sessions');
   fs.copyFileSync(path.join(__dirname, '..', 'server.js'), path.join(fixture, 'server.js'));
-  const seaExecutable = process.env.KIMI_MONITOR_TEST_EXE ? path.join(fixture, 'KimiMonitor.exe') : null;
+  const seaExecutable = process.env.KIMI_MONITOR_TEST_EXE ? path.join(fixture, 'AgentMonitor.exe') : null;
   if (seaExecutable) fs.copyFileSync(process.env.KIMI_MONITOR_TEST_EXE, seaExecutable);
   fs.writeFileSync(path.join(fixture, 'config.json'), JSON.stringify({ roots: [], setupDone: true }));
   makeSession('a', { cwd: 'project-a', title: 'A' }, [event(3000000000), event(10).replace('"type":', '"type": '), '{broken']);

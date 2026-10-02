@@ -1,4 +1,4 @@
-# v1.0.0 — 多 Agent 用量监控
+# AgentMonitor v1.0.0 — 多 Agent 用量监控
 
 本项目的首个独立版本。通过本机会话日志查看多种 Agent 的模型调用次数与 Token 用量，提供 Windows 安装器和 macOS 双架构 DMG，安装后无需 Node.js 或 Rust。
 
@@ -6,10 +6,10 @@
 
 | 平台 | 安装包 |
 |---|---|
-| Windows x64 | [KimiMonitor_1.0.0_x64-setup.exe](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/KimiMonitor_1.0.0_x64-setup.exe) |
-| macOS Apple Silicon / Intel | [KimiMonitor_1.0.0_universal.dmg](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/KimiMonitor_1.0.0_universal.dmg) |
+| Windows x64 | [AgentMonitor_1.0.0_x64-setup.exe](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_x64-setup.exe) |
+| macOS Apple Silicon / Intel | [AgentMonitor_1.0.0_universal.dmg](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_universal.dmg) |
 
-Windows 需要 WebView2；macOS 包未签名或公证。macOS 安装时打开 DMG，将 KimiMonitor 拖入“应用程序”。
+Windows 需要 WebView2；macOS 包未签名或公证。macOS 安装时打开 DMG，将 AgentMonitor 拖入“应用程序”。
 
 ## 主要功能
 

@@ -15,7 +15,7 @@ const path = require('path');
 let DatabaseSync = null;
 try { DatabaseSync = require('node:sqlite').DatabaseSync; } catch { }
 
-// SEA 单文件模式检测（KimiMonitor.exe）：资源内嵌、数据/配置写在 exe 旁边
+// SEA 单文件模式检测（AgentMonitor.exe）：资源内嵌、数据/配置写在 exe 旁边
 let SEA = null;
 try { SEA = require('node:sea'); } catch { }
 const isSEA = !!(SEA && typeof SEA.isSea === 'function' && SEA.isSea());
@@ -117,15 +117,15 @@ function ensureWinShortcut() {
   try {
     const cp = require('child_process');
     const exe = process.execPath;
-    const ico = path.join(CONFIG_DIR, 'KimiMonitor.ico');
+    const ico = path.join(CONFIG_DIR, 'AgentMonitor.ico');
     try { fs.writeFileSync(ico, ASSETS['favicon.ico']); } catch { }
-    const scr = `$d=[Environment]::GetFolderPath('Desktop');$ws=New-Object -ComObject WScript.Shell;$l=$ws.CreateShortcut($d+'\\KimiMonitor.lnk');$l.TargetPath='${exe}';$l.WorkingDirectory='${path.dirname(exe)}';$l.IconLocation='${ico}';$l.Save()`;
+    const scr = `$d=[Environment]::GetFolderPath('Desktop');$ws=New-Object -ComObject WScript.Shell;$l=$ws.CreateShortcut($d+'\\AgentMonitor.lnk');$l.TargetPath='${exe}';$l.WorkingDirectory='${path.dirname(exe)}';$l.IconLocation='${ico}';$l.Save()`;
     cp.exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${scr}"`, { windowsHide: true }, () => { });
   } catch { }
 }
 
 // ---------- 关闭 Edge 应用窗口（按页面标题匹配，WM_CLOSE 只关本应用窗口，不影响其他 Edge 标签） ----------
-const APP_TITLE = 'Agent 用量监控';
+const APP_TITLE = 'AgentMonitor';
 const WIN32_CLOSE_CS = "using System;using System.Runtime.InteropServices;using System.Text;public class Win32Close{public delegate bool EnumProc(IntPtr h,IntPtr l);[DllImport(\"user32.dll\")]public static extern bool EnumWindows(EnumProc cb,IntPtr l);[DllImport(\"user32.dll\")]public static extern int GetWindowText(IntPtr h,StringBuilder t,int n);[DllImport(\"user32.dll\")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);[DllImport(\"user32.dll\")]public static extern bool IsWindowVisible(IntPtr h);public static void CloseByTitle(string title){EnumWindows(delegate(IntPtr h,IntPtr l){if(IsWindowVisible(h)){var sb=new StringBuilder(256);GetWindowText(h,sb,256);if(sb.ToString().Contains(title))PostMessage(h,0x0010,IntPtr.Zero,IntPtr.Zero);}return true;},IntPtr.Zero);}}";
 function closeAppWindows() {
   if (process.platform !== 'win32') return;
@@ -150,7 +150,7 @@ function startTray() {
   try {
     let ico = path.join(PUBLIC_DIR, 'favicon.ico');
     if (isSEA) {
-      ico = path.join(CONFIG_DIR, 'KimiMonitor.ico');
+      ico = path.join(CONFIG_DIR, 'AgentMonitor.ico');
       try { fs.writeFileSync(ico, ASSETS['favicon.ico']); } catch { }
     }
     const ps = [
@@ -160,7 +160,7 @@ function startTray() {
       `$ico = New-Object System.Drawing.Icon('${ico.replace(/'/g, "''")}')`,
       "$ni = New-Object System.Windows.Forms.NotifyIcon",
       "$ni.Icon = $ico",
-      "$ni.Text = 'KimiMonitor — 点击打开'",
+      "$ni.Text = 'AgentMonitor — 点击打开'",
       "$ni.Visible = $true",
       `$base = 'http://127.0.0.1:${PORT}'`,
       "$menu = New-Object System.Windows.Forms.ContextMenuStrip",
@@ -783,7 +783,7 @@ const logErr = (...a) => { try { console.error(...a); } catch { } };
 
 server.on('error', e => {
   if (e && e.code === 'EADDRINUSE') {
-    log(`[kimi-usage-monitor] 端口 ${PORT} 已被占用，本次服务未启动；请确认占用者是 KimiMonitor，或更换端口。`);
+    log(`[kimi-usage-monitor] 端口 ${PORT} 已被占用，本次服务未启动；请确认占用者是 AgentMonitor，或更换端口。`);
     if (isSEA && !process.env.KIMI_NO_OPEN) openBrowser(`http://127.0.0.1:${PORT}/`);
     process.exit(0);
   }

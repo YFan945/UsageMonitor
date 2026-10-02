@@ -1931,7 +1931,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kimimonitor"
+name = "agentmonitor"
 version = "1.0.0"
 dependencies = [
  "chrono",

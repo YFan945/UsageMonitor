@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "KimiMonitor",
+  "productName": "AgentMonitor",
   "version": "1.0.0",
   "identifier": "com.yfan945.kimimonitor",
   "build": {

@@ -2,7 +2,7 @@
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
-title KimiMonitor
+title AgentMonitor
 
 rem --- 读取端口（服务启动时写入的 port.txt，默认 43110）---
 set "PORT=43110"
@@ -13,7 +13,7 @@ set "NODE_EXE="
 where node >nul 2>nul && set "NODE_EXE=node"
 if not defined NODE_EXE if exist "%~dp0runtime\node.exe" set "NODE_EXE=%~dp0runtime\node.exe"
 if defined NODE_EXE goto run
-echo [KimiMonitor] 未找到 Node.js。
+echo [AgentMonitor] 未找到 Node.js。
 echo 源码运行需要 Node.js 18 或更高版本；绿色发行包已含 runtime\node.exe，请确认完整解压。
 pause
 exit /b 1

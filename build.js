@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * KimiMonitor Node/SEA 维护版打包（Windows，Node >= 20.12；非 Rust 桌面构建）
+ * AgentMonitor Node/SEA 维护版打包（Windows，Node >= 20.12；非 Rust 桌面构建）
  * 用法：
  *   node build.js            构建全部 Windows 产物到 dist\（单文件 exe + 安装包 + 绿色版 zip）+ 冒烟测试
  *   node build.js --mac      额外构建 macOS .app 包（需联网下载 node 官方二进制，约 100MB）
@@ -54,10 +54,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const issText = fs.readFileSync(path.join(ROOT, 'packaging', 'installer.iss'), 'utf8');
   const VER = (issText.match(/#define MyAppVersion "([^"]+)"/) || [])[1];
   if (!VER) die('无法从 packaging/installer.iss 读取 MyAppVersion');
-  log(`====== KimiMonitor v${VER} ======`);
+  log(`====== AgentMonitor v${VER} ======`);
 
   // dist 只做已知产物的 best-effort 清理（可能有用户正在下载等外部占用，不整体删除）
-  for (const f of ['KimiMonitor.exe', `KimiMonitor-Setup-${VER}.exe`, 'KimiMonitor-Windows-x64.exe', 'sea-prep.blob', 'config.json', 'port.txt', 'KimiMonitor.ico', 'notes.md'])
+  for (const f of ['AgentMonitor.exe', `AgentMonitor-Setup-${VER}.exe`, 'AgentMonitor-Windows-x64.exe', 'sea-prep.blob', 'config.json', 'port.txt', 'AgentMonitor.ico', 'notes.md'])
     fs.rmSync(path.join(DIST, f), { force: true, recursive: true });
   fs.mkdirSync(DIST, { recursive: true });
 
@@ -66,30 +66,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   run('node', ['--experimental-sea-config', 'sea-config.json'], { cwd: ROOT });
 
   const nodeExe = process.execPath;
-  fs.copyFileSync(nodeExe, path.join(DIST, 'KimiMonitor.exe'));
+  fs.copyFileSync(nodeExe, path.join(DIST, 'AgentMonitor.exe'));
   const fuse = (fs.readFileSync(nodeExe).toString('latin1').match(/NODE_SEA_FUSE_[0-9a-f]{32}/) || [])[0];
   if (!fuse) die('node.exe 中未找到 NODE_SEA_FUSE 哨兵（Node 版本过旧？需 >= 20.12）');
   log('哨兵 fuse =', fuse);
 
   log('注入 postject（约半分钟）...');
-  run('npx', ['-y', 'postject', 'dist/KimiMonitor.exe', 'NODE_SEA_BLOB', 'sea-prep.blob', '--sentinel-fuse', fuse], { cwd: ROOT, shell: true });
+  run('npx', ['-y', 'postject', 'dist/AgentMonitor.exe', 'NODE_SEA_BLOB', 'sea-prep.blob', '--sentinel-fuse', fuse], { cwd: ROOT, shell: true });
   // PE 头 Subsystem: 3(控制台)→2(GUI)，双击/安装后不再弹出黑色控制台窗口
   {
-    const buf = fs.readFileSync(path.join(DIST, 'KimiMonitor.exe'));
+    const buf = fs.readFileSync(path.join(DIST, 'AgentMonitor.exe'));
     const pe = buf.readUInt32LE(0x3c);
     if (buf.readUInt16LE(pe + 0x5c) === 3) { // PE32+ OptionalHeader.Subsystem
       buf.writeUInt16LE(2, pe + 0x5c);
-      fs.writeFileSync(path.join(DIST, 'KimiMonitor.exe'), buf);
+      fs.writeFileSync(path.join(DIST, 'AgentMonitor.exe'), buf);
       ok('已切换为 GUI 子系统（无控制台窗口）');
     } else console.warn('[33m[build] ! 未找到控制台子系统标记，跳过 GUI 补丁[0m');
   }
-  ok(`dist/KimiMonitor.exe（${(fs.statSync(path.join(DIST, 'KimiMonitor.exe')).size / 1048576).toFixed(1)} MB）`);
+  ok(`dist/AgentMonitor.exe（${(fs.statSync(path.join(DIST, 'AgentMonitor.exe')).size / 1048576).toFixed(1)} MB）`);
 
   // ---------- 2. 冒烟测试 ----------
   log('冒烟测试：启动单文件 exe...');
   {
     const port = 40000 + Math.floor(Math.random() * 20000);
-    const child = spawn(path.join(DIST, 'KimiMonitor.exe'), ['--port', String(port)], {
+    const child = spawn(path.join(DIST, 'AgentMonitor.exe'), ['--port', String(port)], {
       cwd: DIST, stdio: 'ignore',
       env: { ...process.env, KIMI_NO_OPEN: '1', KIMI_NO_SHORTCUT: '1', KIMI_NO_TRAY: '1' },
     });
@@ -103,7 +103,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await sleep(800);
     try { child.kill(); } catch { }
   }
-  for (const f of ['config.json', 'port.txt', 'KimiMonitor.ico']) // 清理测试残留
+  for (const f of ['config.json', 'port.txt', 'AgentMonitor.ico']) // 清理测试残留
     fs.rmSync(path.join(DIST, f), { force: true });
   ok('服务可启动、API 正常（测试残留已清理）');
 
@@ -118,7 +118,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (iscc) {
     log('构建安装包（Inno Setup）...');
     run(iscc, [path.join(ROOT, 'packaging', 'installer.iss')]);
-    ok(`dist/KimiMonitor-Setup-${VER}.exe`);
+    ok(`dist/AgentMonitor-Setup-${VER}.exe`);
   } else {
     console.warn('\x1b[33m[build] ! 未检测到 Inno Setup 编译器，跳过 Windows 安装包；需要安装包时安装 Inno Setup 后重新构建。\x1b[0m');
   }
@@ -135,7 +135,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     fs.cpSync(path.join(ROOT, 'public'), path.join(stage, 'public'), { recursive: true });
     for (const f of fs.readdirSync(ROOT)) if (f.endsWith('.bat')) fs.copyFileSync(path.join(ROOT, f), path.join(stage, f));
     fs.copyFileSync(nodeExe, path.join(stage, 'runtime', 'node.exe'));
-    const zipPath = path.join(DIST, 'KimiMonitor-Windows-Portable.zip');
+    const zipPath = path.join(DIST, 'AgentMonitor-Windows-Portable.zip');
     const zipPy = 'import os,sys,zipfile\nst,out=sys.argv[1],sys.argv[2]\nwith zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:\n  for root,dirs,files in os.walk(st):\n    for f in files:\n      p=os.path.join(root,f)\n      z.write(p, os.path.relpath(p,st))\nprint("zipped")';
     let done = false;
     for (const py of ['python', 'py']) {
@@ -146,7 +146,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       run('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${stage}\\*' -DestinationPath '${zipPath}' -Force`]);
     }
     fs.rmSync(stage, { recursive: true, force: true });
-    ok(`dist/KimiMonitor-Windows-Portable.zip（${(fs.statSync(zipPath).size / 1048576).toFixed(1)} MB）`);
+    ok(`dist/AgentMonitor-Windows-Portable.zip（${(fs.statSync(zipPath).size / 1048576).toFixed(1)} MB）`);
   }
 
   // ---------- 5. macOS .app 包（可选） ----------
@@ -163,7 +163,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       fs.rmSync(path.join(stage, `node-${MAC_NODE_VER}-darwin-${arch}`), { recursive: true, force: true });
       fs.rmSync(tgz, { force: true });
     }
-    const app = path.join(stage, 'KimiMonitor.app');
+    const app = path.join(stage, 'AgentMonitor.app');
     fs.mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true });
     fs.mkdirSync(path.join(app, 'Contents', 'Resources', 'bin'), { recursive: true });
     fs.mkdirSync(path.join(app, 'Contents', 'Resources', 'app'), { recursive: true });
@@ -172,7 +172,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(app, 'Contents', 'Resources', 'app', 'server.js'));
     fs.cpSync(path.join(ROOT, 'public'), path.join(app, 'Contents', 'Resources', 'app', 'public'), { recursive: true });
     fs.writeFileSync(path.join(app, 'Contents', 'MacOS', 'kimi-monitor'), `#!/bin/bash
-# KimiMonitor — macOS 启动器：选择对应架构的 node 运行 server.js，并打开浏览器
+# AgentMonitor — macOS 启动器：选择对应架构的 node 运行 server.js，并打开浏览器
 DIR="$(cd "$(dirname "$0")" && pwd)"
 RES="$DIR/../Resources"
 case "$(uname -m)" in
@@ -191,8 +191,8 @@ open "http://127.0.0.1:$PORT/"
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-\t<key>CFBundleName</key><string>KimiMonitor</string>
-\t<key>CFBundleDisplayName</key><string>KimiMonitor</string>
+\t<key>CFBundleName</key><string>AgentMonitor</string>
+\t<key>CFBundleDisplayName</key><string>AgentMonitor</string>
 \t<key>CFBundleIdentifier</key><string>com.yfan945.kimi-monitor</string>
 \t<key>CFBundleVersion</key><string>${VER}</string>
 \t<key>CFBundleShortVersionString</key><string>${VER}</string>
@@ -207,9 +207,9 @@ open "http://127.0.0.1:$PORT/"
 </plist>
 `);
     fs.writeFileSync(path.join(stage, '卸载.command'), `#!/bin/bash
-# KimiMonitor 卸载脚本
-pkill -f "node-darwin.*/KimiMonitor.app" 2>/dev/null
-rm -rf "/Applications/KimiMonitor.app" "$HOME/Library/Application Support/KimiMonitor"
+# AgentMonitor 卸载脚本
+pkill -f "node-darwin.*/AgentMonitor.app" 2>/dev/null
+rm -rf "/Applications/AgentMonitor.app" "$HOME/Library/Application Support/KimiMonitor"
 echo "应用与 Node 配置清理操作已结束；如有错误请查看上方输出。请确认原监控进程已退出。"
 `);
     const icns = path.join(app, 'Contents', 'Resources', 'icon.icns');
@@ -227,10 +227,10 @@ def add(tf,p,arc,mode):
     else:
         with open(p,"rb") as f: tf.addfile(ti,f)
 with tarfile.open(out,"w:gz") as tf:
-    add(tf,os.path.join(stage,"KimiMonitor.app"),"KimiMonitor.app",0o755)
+    add(tf,os.path.join(stage,"AgentMonitor.app"),"AgentMonitor.app",0o755)
     add(tf,os.path.join(stage,"卸载.command"),"卸载.command",0o755)
 print("tared")`;
-    const macTgz = path.join(DIST, 'Kimi-Monitor-macOS.tar.gz');
+    const macTgz = path.join(DIST, 'AgentMonitor-macOS.tar.gz');
     let tarOk = false;
     for (const py of ['python', 'py']) {
       const rr = spawnSync(py, ['-c', tarPy, stage, macTgz], { encoding: 'utf8' });
@@ -238,15 +238,15 @@ print("tared")`;
     }
     if (!tarOk) die('macOS tar 打包失败（需要 Python）');
     fs.rmSync(stage, { recursive: true, force: true });
-    ok(`dist/Kimi-Monitor-macOS.tar.gz（${(fs.statSync(macTgz).size / 1048576).toFixed(1)} MB）`);
+    ok(`dist/AgentMonitor-macOS.tar.gz（${(fs.statSync(macTgz).size / 1048576).toFixed(1)} MB）`);
   }
 
   // ---------- 6. 发布资产清单（统一在 dist/） ----------
-  fs.copyFileSync(path.join(DIST, 'KimiMonitor.exe'), path.join(DIST, 'KimiMonitor-Windows-x64.exe'));
-  const assets = [path.join(DIST, 'KimiMonitor-Windows-x64.exe')];
-  if (fs.existsSync(path.join(DIST, `KimiMonitor-Setup-${VER}.exe`))) assets.push(path.join(DIST, `KimiMonitor-Setup-${VER}.exe`));
-  assets.push(path.join(DIST, 'KimiMonitor-Windows-Portable.zip'));
-  if (WANT_MAC) assets.push(path.join(DIST, 'Kimi-Monitor-macOS.tar.gz'));
+  fs.copyFileSync(path.join(DIST, 'AgentMonitor.exe'), path.join(DIST, 'AgentMonitor-Windows-x64.exe'));
+  const assets = [path.join(DIST, 'AgentMonitor-Windows-x64.exe')];
+  if (fs.existsSync(path.join(DIST, `AgentMonitor-Setup-${VER}.exe`))) assets.push(path.join(DIST, `AgentMonitor-Setup-${VER}.exe`));
+  assets.push(path.join(DIST, 'AgentMonitor-Windows-Portable.zip'));
+  if (WANT_MAC) assets.push(path.join(DIST, 'AgentMonitor-macOS.tar.gz'));
   ok('产物已生成到 dist/：');
   for (const f of assets)
     console.log(`   ${path.basename(f)}  (${(fs.statSync(f).size / 1048576).toFixed(1)} MB)`);
@@ -255,9 +255,9 @@ print("tared")`;
   if (WANT_RELEASE) {
     const tag = `v${VER}`;
     log(`上传到 GitHub Release ${tag}...`);
-    const installerRow = assets.some(f => path.basename(f) === `KimiMonitor-Setup-${VER}.exe`)
-      ? `| KimiMonitor-Setup-${VER}.exe | Windows x64 | 当前用户安装，包含 Node runtime |\n` : '';
-    const notes = `# KimiMonitor v${VER} — Node/SEA 维护版\n\n此发行线通过本地 Node 服务读取 Kimi Code 会话日志，统计调用次数与 token 用量，包含子 agent；用量合计不代表费用或剩余额度。Rust/Tauri 继续作为 Latest。\n\n| 文件 | 平台 | 用法 |\n|---|---|---|\n${installerRow}| KimiMonitor-Windows-x64.exe | Windows x64 | 直接运行，配置保存在 exe 旁边 |\n| KimiMonitor-Windows-Portable.zip | Windows x64 | 完整解压后运行启动监控.bat，内含 runtime/node.exe |\n${WANT_MAC ? '| Kimi-Monitor-macOS.tar.gz | macOS 11+，Apple Silicon / Intel | 解压后打开 KimiMonitor.app，内含两种架构的 Node runtime |\n' : ''}\n关闭界面不会停止服务，请通过页面或 Windows 托盘“退出”。升级前先退出旧服务并保留配置；原 Kimi Code 会话文件只读。\n\n此说明由打包脚本生成，发布前请补充该版本实际修复和验证结果。完整使用、配置和迁移说明见 [README](https://github.com/YFan945/kimi-usage-monitor#readme)。`;
+    const installerRow = assets.some(f => path.basename(f) === `AgentMonitor-Setup-${VER}.exe`)
+      ? `| AgentMonitor-Setup-${VER}.exe | Windows x64 | 当前用户安装，包含 Node runtime |\n` : '';
+    const notes = `# AgentMonitor v${VER} — Node/SEA 维护版\n\n此发行线通过本地 Node 服务读取 Kimi Code 会话日志，统计调用次数与 token 用量，包含子 agent；用量合计不代表费用或剩余额度。Rust/Tauri 继续作为 Latest。\n\n| 文件 | 平台 | 用法 |\n|---|---|---|\n${installerRow}| AgentMonitor-Windows-x64.exe | Windows x64 | 直接运行，配置保存在 exe 旁边 |\n| AgentMonitor-Windows-Portable.zip | Windows x64 | 完整解压后运行启动监控.bat，内含 runtime/node.exe |\n${WANT_MAC ? '| AgentMonitor-macOS.tar.gz | macOS 11+，Apple Silicon / Intel | 解压后打开 AgentMonitor.app，内含两种架构的 Node runtime |\n' : ''}\n关闭界面不会停止服务，请通过页面或 Windows 托盘“退出”。升级前先退出旧服务并保留配置；原 Kimi Code 会话文件只读。\n\n此说明由打包脚本生成，发布前请补充该版本实际修复和验证结果。完整使用、配置和迁移说明见 [README](https://github.com/YFan945/kimi-usage-monitor#readme)。`;
     const notesFile = path.join(DIST, 'notes.md');
     fs.writeFileSync(notesFile, notes);
     const exists = spawnSync('gh', ['release', 'view', tag, '--repo', REPO], { stdio: 'ignore', shell: true }).status === 0;

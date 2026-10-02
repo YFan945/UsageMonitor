@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 mod agents;
 
-const APP_TITLE: &str = "Agent 用量监控";
+const APP_TITLE: &str = "AgentMonitor";
 const PORT: u16 = 43110; // 优先端口；被占用时自动回退随机端口
 
 const INDEX_HTML: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../public/index.html"));
@@ -727,7 +727,7 @@ fn main() {
             let menu = MenuBuilder::new(app).item(&open_item).item(&quit_item).build()?;
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("KimiMonitor")
+                .tooltip("AgentMonitor")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, ev| match ev.id().as_ref() {
@@ -756,7 +756,7 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("启动 KimiMonitor Rust/Tauri 桌面版失败");
+        .expect("启动 AgentMonitor Rust/Tauri 桌面版失败");
 }
 
 #[cfg(test)]

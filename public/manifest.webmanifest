@@ -1,5 +1,5 @@
 {
-  "name": "Agent 用量监控",
+  "name": "AgentMonitor",
   "short_name": "AgentMonitor",
   "description": "查看本机 Agent 调用次数和 token 用量；需要本地监控服务运行",
   "start_url": "/",
