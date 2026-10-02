@@ -192,7 +192,7 @@ footer code{color:var(--text)}
       <label title="每 10 秒更新界面；关闭此项不会停止后台监控"><input type="checkbox" id="auto" checked> 自动刷新（10 秒）</label>
       <button id="settingsBtn" disabled>设置</button>
       <button id="refreshBtn">刷新</button>
-      <button id="quitBtn" title="停止当前监控服务；关闭窗口只会关闭或隐藏界面">退出</button>
+      <button id="quitBtn" title="停止当前监控服务">退出</button>
     </div>
   </header>
 
@@ -292,9 +292,15 @@ footer code{color:var(--text)}
 <div id="tooltip"></div>
 <div id="hmTip"><div class="t1"></div><div class="t2"></div></div>
 <dialog id="rankDetails" class="detail-dialog" aria-labelledby="detailTitle">
+
   <h2 class="rank-heading"><span id="detailTitle"></span><button id="detailClose" aria-label="关闭详情">×</button></h2>
   <p id="detailScope" class="range-info"></p>
   <div class="detail-layout"><div id="detailTable" class="detail-table"></div><aside id="detailPie" class="detail-pie" aria-label="Token 占比"></aside></div>
+</dialog>
+<dialog id="closeAsk" class="detail-dialog" style="width:min(440px,92vw)" aria-labelledby="closeAskTitle">
+  <h2 id="closeAskTitle" style="position:static;border:0;padding:0">关闭 AgentMonitor</h2>
+  <p style="color:var(--muted);margin:8px 0 16px">要彻底退出应用，还是隐藏到后台继续监测？</p>
+  <div class="settings-actions"><button id="closeAskCancel">取消</button><button id="closeAskHide">后台运行</button><button class="primary" id="closeAskExit">退出应用</button></div>
 </dialog>
 <div id="settings" class="settings-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
   <div class="settings-card">
@@ -302,6 +308,12 @@ footer code{color:var(--text)}
     <label>主题 <select id="settingsTheme"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
     <div class="settings-section"><h3>监测的 Agent</h3><p class="range-info">勾选来源并填写日志目录。移除监测不会删除会话文件。</p><div id="settingsMonitors"></div><button id="addMonitor" style="margin-top:10px">添加其他目录</button></div>
     <div class="settings-section"><h3>监测的模型</h3><label><input type="checkbox" id="allModels"> 自动监测所有模型（包含未来新模型）</label><div id="settingsModels" class="model-list"></div><div class="range-row"><input id="newModel" class="model-input" style="flex:1" placeholder="添加完整模型 ID，如 gpt-5 或 deepseek-chat"><button id="addModel">添加模型</button></div></div>
+    <div class="settings-section" id="closeActionSection" hidden><h3>关闭应用时</h3>
+      <label style="display:block;margin:4px 0"><input type="radio" name="closeAction" value="exit"> 直接关闭应用</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="closeAction" value="background"> 后台运行（隐藏到托盘，可从托盘恢复）</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="closeAction" value="ask"> 每次询问</label>
+      <p class="range-info">仅对桌面版生效。托盘菜单中的“退出”始终会彻底退出应用。</p>
+    </div>
     <div class="ob-err" id="settingsErr" role="status"></div>
     <div class="settings-actions"><button id="settingsCancel">取消</button><button class="primary" id="settingsSave">保存设置</button></div>
   </div>
@@ -575,6 +587,7 @@ async function loadData() {
     if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     Object.assign(DATA, j);
     $('#settingsBtn').disabled = false;
+    $('#quitBtn').hidden = !!j.desktop; // 桌面版退出走托盘菜单和关窗设置，不设页面退出键
     refreshFilterOptions();
     maybeOnboard();
     $('#updated').textContent = '数据更新于 ' + new Date(j.generatedAt).toLocaleTimeString('zh-CN', { hour12: false });
@@ -1048,6 +1061,9 @@ function initSettings() {
     $('#settingsModels').innerHTML = '';
     const available = new Set([...(DATA.availableModels || []), ...DATA.records.map(r => r.m), ...(DATA.models || [])]);
     for (const m of [...available].sort()) addModelOption(m, (DATA.models || []).includes(m));
+    $('#closeActionSection').hidden = !DATA.desktop;
+    const curClose = DATA.closeAction || 'background';
+    document.querySelectorAll('input[name="closeAction"]').forEach(r => r.checked = r.value === curClose);
     $('#settings').hidden = false; $('.wrap').inert = true; document.body.style.overflow = 'hidden'; $('#settingsClose').focus();
   });
   $('#settingsClose').addEventListener('click', close); $('#settingsCancel').addEventListener('click', close);
@@ -1084,10 +1100,26 @@ function initSettings() {
       const monitors = readMonitors('#settingsMonitors');
       const models = $('#allModels').checked ? [] : [...$('#settingsModels').querySelectorAll('input:checked')].map(i=>i.value);
       if (!$('#allModels').checked && !models.length) throw new Error('至少选择一个模型，或启用自动监测所有模型');
-      await saveMonitoring({monitors,models});
+      const payload = { monitors, models };
+      if (DATA.desktop) payload.closeAction = document.querySelector('input[name="closeAction"]:checked')?.value || 'background';
+      await saveMonitoring(payload);
       localStorage.setItem('kimi-theme', $('#settingsTheme').value); applyTheme(); close(); await loadData();
     } catch(e) { $('#settingsErr').textContent = e.message; }
     finally { $('#settingsSave').disabled = false; }
+  });
+}
+
+// ---------- 关窗询问：桌面版“每次询问”模式，由 Rust 侧在关窗时 eval 触发 ----------
+window.__closeAsk = () => { const d = $('#closeAsk'); if (!d.open) d.showModal(); };
+function initCloseAsk() {
+  $('#closeAskCancel').addEventListener('click', () => $('#closeAsk').close());
+  $('#closeAskHide').addEventListener('click', async () => {
+    await fetch('/api/app/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'hide' }) }).catch(() => {});
+    $('#closeAsk').close();
+  });
+  $('#closeAskExit').addEventListener('click', async () => {
+    await fetch('/api/app/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'exit' }) }).catch(() => {});
+    document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;color:#8b949e;font-size:15px">AgentMonitor 已退出。</div>';
   });
 }
 
@@ -1137,6 +1169,7 @@ function initSettings() {
   initOnboard();
   initSettings();
   initDetails();
+  initCloseAsk();
   if (ui.hm && ui.hm !== 'day') {
     hmMode = ui.hm;
     document.querySelectorAll('#hmModes .chip').forEach(x => x.classList.toggle('on', x.dataset.m === hmMode));

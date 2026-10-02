@@ -3,7 +3,7 @@
 // KimiMonitor 桌面版（Tauri v2）：
 // Rust 内核完整移植原 server.js 数据引擎（扫描 wire.jsonl / 聚合 usage.record），
 // 内嵌 HTTP 服务（127.0.0.1:43110，被占用时回退随机端口），原生托盘（打开窗口/退出），
-// 关窗 = 隐藏到后台，托盘退出 = 彻底退出。不再依赖 PowerShell / Edge --app。
+// 关窗行为可在设置中选择：直接退出 / 隐藏到后台（默认）/ 每次询问。不再依赖 PowerShell / Edge --app。
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -56,6 +56,7 @@ struct Config {
     setup_done: bool,
     monitors: Option<Vec<Value>>,
     models: Vec<String>,
+    close_action: String,
 }
 
 #[derive(Default)]
@@ -103,6 +104,7 @@ fn valid_config(body: &Value) -> bool {
         && body.get("monitors").map(agents::valid_monitors).unwrap_or(true)
         && body.get("models").map(|v| v.as_array().map(|a| a.iter().all(Value::is_string)).unwrap_or(false)).unwrap_or(true)
         && body.get("setupDone").map(Value::is_boolean).unwrap_or(true)
+        && body.get("closeAction").map(|v| matches!(v.as_str(), Some("exit") | Some("background") | Some("ask"))).unwrap_or(true)
 }
 
 fn file_mtime(p: &Path) -> Option<i64> {
@@ -171,6 +173,7 @@ impl Engine {
 
     fn load_config(&mut self) {
         self.cfg = Config::default();
+        self.cfg.close_action = String::from("background");
         if let Some(text) = [self.config_file(),self.config_dir.join("config.json.bak")].iter().find_map(|p| {
             std::fs::read_to_string(p).ok().filter(|s|serde_json::from_str::<Value>(s).is_ok())
         }) {
@@ -180,6 +183,7 @@ impl Engine {
                 }
                 if agents::valid_monitors(&j["monitors"]) { self.cfg.monitors = Some(agents::normalize(j["monitors"].as_array().unwrap())); }
                 if let Some(a) = j["models"].as_array() { self.cfg.models = a.iter().filter_map(|v| v.as_str().map(String::from)).collect(); }
+                if let Some(a) = j.get("closeAction").and_then(|v| v.as_str()) { self.cfg.close_action = a.into(); }
                 if let Some(b) = j.get("setupDone").and_then(|v| v.as_bool()) {
                     self.cfg.setup_done = b;
                 } else if !self.cfg.roots.is_empty() {
@@ -198,7 +202,7 @@ impl Engine {
     }
 
     fn save_config(&self) -> std::io::Result<()> {
-        let body = json!({"roots": self.cfg.roots, "setupDone": self.cfg.setup_done,"monitors":self.cfg.monitors,"models":self.cfg.models});
+        let body = json!({"roots": self.cfg.roots, "setupDone": self.cfg.setup_done,"monitors":self.cfg.monitors,"models":self.cfg.models,"closeAction":self.close_action()});
         std::fs::create_dir_all(&self.config_dir)?;
         let temp=self.config_dir.join("config.json.tmp");
         let result=(|| {
@@ -483,7 +487,7 @@ impl Engine {
             "defaultStats": default_stats,
             "sessions": sessions_json,
             "records": records_json,
-            "agents":agents::catalog(),"monitors":self.monitors_json(),"models":self.cfg.models,"availableModels":available_models,
+            "agents":agents::catalog(),"monitors":self.monitors_json(),"models":self.cfg.models,"availableModels":available_models,"desktop":true,"closeAction":self.close_action(),
             "warnings":self.scan_warnings,
         });
         let s = body.to_string();
@@ -523,6 +527,7 @@ impl Engine {
             self.cfg.models = models.iter().filter_map(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
             self.cfg.models.sort();self.cfg.models.dedup();
         }
+        if let Some(a) = body.get("closeAction").and_then(|v| v.as_str()) { self.cfg.close_action = a.into(); }
         match body.get("setupDone").and_then(|v| v.as_bool()) {
             Some(b) => self.cfg.setup_done = b,
             None => self.cfg.setup_done = self.cfg.setup_done || !self.cfg.roots.is_empty(),
@@ -540,6 +545,11 @@ impl Engine {
     fn monitors_json(&self) -> Vec<Value> {
         let rows = self.cfg.monitors.clone().unwrap_or_else(|| self.cfg.roots.iter().map(|root|json!({"agent":"kimi","root":root,"enabled":true})).collect());
         rows.into_iter().map(|mut m| {m["exists"] = json!(Path::new(m["root"].as_str().unwrap_or_default()).is_dir());m}).collect()
+    }
+
+    // 关窗行为：未知或空值一律回退为后台运行
+    fn close_action(&self) -> &str {
+        match self.cfg.close_action.as_str() { "exit" | "ask" => &self.cfg.close_action, _ => "background" }
     }
 }
 
@@ -667,6 +677,26 @@ fn handle_conn(mut stream: TcpStream, engine: std::sync::Arc<std::sync::Mutex<En
         });
         return Ok(());
     }
+    // 关窗询问弹窗的落点：exit=彻底退出，hide=隐藏到托盘
+    if path == "/api/app/close" && method == "POST" {
+        let j: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        match j.get("action").and_then(|v| v.as_str()) {
+            Some("exit") => {
+                respond(&mut stream, "200 OK", "text/plain; charset=utf-8", b"bye".to_vec())?;
+                let app2 = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(150));
+                    app2.exit(0);
+                });
+            }
+            Some("hide") => {
+                if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
+                respond(&mut stream, "200 OK", "text/plain; charset=utf-8", b"ok".to_vec())?;
+            }
+            _ => return respond(&mut stream, "400 Bad Request", "application/json; charset=utf-8", json!({"error":"action 需为 exit 或 hide"}).to_string().into_bytes()),
+        }
+        return Ok(());
+    }
     if method == "GET" {
         if let Some((bytes, ctype)) = static_asset(&path) {
             return respond(&mut stream, "200 OK", ctype, bytes.to_vec());
@@ -707,6 +737,7 @@ fn renamed_config_dir(app_config_dir: Option<PathBuf>) -> PathBuf {
 
 fn main() {
     let engine = std::sync::Arc::new(std::sync::Mutex::new(Engine::new(PathBuf::from(""))));
+    let close_engine = engine.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -771,11 +802,21 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // 关闭窗口 = 隐藏到后台（托盘常驻）；托盘「退出」才是真退出
+        .on_window_event(move |window, event| {
+            // 关窗行为跟随设置中的“关闭应用时”：直接退出 / 隐藏到后台（默认）/ 每次询问
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                let mode = close_engine.lock().map(|e| e.close_action().to_string()).unwrap_or_default();
+                match mode.as_str() {
+                    "exit" => {} // 允许窗口关闭，应用随之退出
+                    "ask" => {
+                        api.prevent_close();
+                        show_main(window.app_handle());
+                        if let Some(w) = window.get_webview_window("main") {
+                            let _ = w.eval("if(window.__closeAsk)window.__closeAsk()");
+                        }
+                    }
+                    _ => { api.prevent_close(); let _ = window.hide(); } // 后台运行：托盘常驻
+                }
             }
         })
         .run(tauri::generate_context!())
@@ -785,6 +826,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_action_roundtrip_and_validation() {
+        let fixture = Fixture::new();
+        let mut e = fixture.engine();
+        assert_eq!(e.close_action(), "background"); // 默认后台运行
+        assert!(!e.apply_config(&json!({"monitors":[],"closeAction":"exit"})).contains("error"));
+        assert_eq!(e.close_action(), "exit");
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(e.config_file()).unwrap()).unwrap();
+        assert_eq!(saved["closeAction"], "exit");
+        // 非法值在 HTTP 配置校验层被拒绝；Engine 内未知值回退为后台运行
+        assert!(!valid_config(&json!({"monitors":[],"closeAction":"never"})));
+        assert!(valid_config(&json!({"monitors":[],"closeAction":"ask"})));
+        e.cfg.close_action = String::from("weird");
+        assert_eq!(e.close_action(), "background");
+    }
 
     #[test]
     fn renamed_config_dir_drops_identifier_naming() {
