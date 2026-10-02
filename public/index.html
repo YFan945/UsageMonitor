@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kimi Code 用量监控</title>
+<title>Agent 用量监控</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0d1117">
 <link rel="icon" type="image/png" href="/icon.png">
@@ -144,31 +144,57 @@ tbody tr:hover{background:var(--hover)}
 footer{color:var(--muted);font-size:12px;margin-top:24px;line-height:1.8}
 footer code{color:var(--text)}
 .badge{background:var(--accent-soft);color:var(--accent);border-radius:10px;padding:1px 8px;font-size:11px}
+.settings-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);z-index:60;display:flex;justify-content:center;align-items:center;padding:16px}
+.settings-overlay[hidden]{display:none}
+.settings-card{width:760px;max-width:100%;max-height:90dvh;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:24px}
+.settings-card h2{justify-content:space-between;margin-bottom:18px}
+.settings-section{margin-top:20px}
+.settings-section h3{font-size:14px;margin-bottom:8px}
+.monitor-row{display:grid;grid-template-columns:170px 1fr;gap:8px;padding:10px 0;border-bottom:1px solid var(--border);align-items:center}
+.monitor-row label{display:flex;gap:8px;align-items:center}
+.monitor-path,.model-input{width:100%;min-width:0;border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:6px;padding:7px 10px;font:inherit}
+.monitor-row small{grid-column:2;color:var(--muted);font-size:11px}
+.model-list{display:flex;gap:8px 16px;flex-wrap:wrap;margin:10px 0}
+.model-list label{display:flex;align-items:center;gap:6px}
+.settings-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.settings-card h2{position:sticky;top:-24px;background:var(--panel);padding:10px 0;z-index:1}
+.settings-actions{position:sticky;bottom:-24px;background:var(--panel);padding:12px 0;border-top:1px solid var(--border)}
+.ob-card{max-height:92dvh;overflow-y:auto;width:760px;max-width:calc(100vw - 32px)}
+.rank-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.rank-heading{justify-content:space-between;flex-wrap:wrap;gap:8px}
+.rank-heading button{margin-left:auto;font-size:12px}
+.rank-grid .hbar-row{flex-wrap:wrap;gap:6px}
+.rank-grid .hbar-row .name{width:100px}
+.rank-grid .hbar-row .val{width:100%}
+.detail-dialog{position:fixed;inset:0;margin:auto;width:min(1200px,94vw);max-height:90dvh;padding:24px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:12px}
+.detail-dialog::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
+.detail-dialog h2{display:flex;align-items:center;font-size:16px;position:sticky;top:-24px;background:var(--panel);padding:8px 0;z-index:2}
+.detail-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:24px;align-items:start}
+.detail-layout.sessions-only{grid-template-columns:minmax(0,1fr)}
+.detail-pie[hidden]{display:none}
+.detail-table{overflow:auto;max-height:65dvh}
+.detail-table .detail-name{white-space:normal;min-width:180px;overflow-wrap:anywhere}
+.detail-pie{position:sticky;top:0}
+.pie-disc{width:220px;height:220px;border-radius:50%;margin:12px auto 20px;border:1px solid var(--border)}
+.pie-key{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:8px;align-items:center;margin:8px 0;font-size:12px}
+.pie-key i{width:10px;height:10px;border-radius:3px}
+.pie-key span{overflow-wrap:anywhere}
+@media(max-width:1000px){.rank-grid{grid-template-columns:1fr}.detail-layout{grid-template-columns:minmax(0,1fr)}.detail-pie{position:static;grid-row:1}.detail-table{max-height:45dvh}}
+@media(max-width:600px){.monitor-row{grid-template-columns:1fr}.monitor-row small{grid-column:1}.settings-card{padding:16px}.ob-card{padding:20px}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1><span class="dot"></span>Kimi Code 用量监控</h1>
+    <h1><span class="dot"></span>Agent 用量监控</h1>
     <div class="h-meta">
       <span id="updated">正在读取本机会话记录…</span>
       <label title="每 10 秒更新界面；关闭此项不会停止后台监控"><input type="checkbox" id="auto" checked> 自动刷新（10 秒）</label>
-      <button id="dirBtn">数据目录</button>
-      <button id="themeBtn">主题：自动</button>
+      <button id="settingsBtn" disabled>设置</button>
       <button id="refreshBtn">刷新</button>
       <button id="quitBtn" title="停止当前监控服务；关闭窗口只会关闭或隐藏界面">退出</button>
     </div>
   </header>
-
-  <div class="card" id="dirPanel" style="display:none">
-    <h2>扫描目录<span style="font-weight:400">添加 Kimi Code 会话目录，支持多个目录</span></h2>
-    <div id="dirList"></div>
-    <div class="range-row" style="margin-top:4px">
-      <input id="dirInput" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 10px;font-size:13px" placeholder="填写本机会话目录，如 C:\Users\用户名\.kimi-code\sessions 或 /Users/用户名/.kimi-code/sessions">
-      <button class="primary" id="dirAdd">添加</button>
-    </div>
-    <div class="range-info">修改后自动更新数据；移除目录不会删除原文件。</div>
-  </div>
 
   <div class="card">
     <h2 title="显示最近约一年，不受下方时段和模型/项目筛选影响；累计从可见范围的第一周起算">Token 活动总览<span class="chips" id="hmModes">
@@ -213,8 +239,13 @@ footer code{color:var(--text)}
     <div class="filter-row">
       <span class="f-label">着色</span>
       <span class="chips" id="barModes">
-        <span class="chip on" data-b="type">按类型</span><span class="chip" data-b="model">按模型</span>
+        <span class="chip on" data-b="type">按类型</span><span class="chip" data-b="model">按模型</span><span class="chip" data-b="agent">按 Agent</span>
       </span>
+      <span class="f-label">Agent</span>
+      <div class="mselect">
+        <button type="button" class="ms-btn" id="msAgentBtn">全部</button>
+        <div class="ms-panel" id="msAgentPanel" hidden></div>
+      </div>
       <span class="f-label">模型</span>
       <div class="mselect">
         <button type="button" class="ms-btn" id="msModelBtn">全部</button>
@@ -240,13 +271,14 @@ footer code{color:var(--text)}
     </div>
   </div>
 
-  <div class="grid2">
-    <div class="card"><h2 title="当前时段用量最高的前 8 项；点击切换筛选，排行本身不受模型/项目筛选影响">模型排行 · 前 8 项</h2><div id="byModel"></div></div>
-    <div class="card"><h2 title="当前时段用量最高的前 8 项；项目按完整工作目录分组，点击切换筛选">项目排行 · 前 8 项</h2><div id="byProject"></div></div>
+  <div class="rank-grid">
+    <div class="card"><h2 class="rank-heading" title="当前时段前 8 项，排行不受模型/项目/Agent 筛选影响；点击横条切换筛选">模型排行 · 前 8 项<button data-detail="model">查看全部</button></h2><div id="byModel"></div></div>
+    <div class="card"><h2 class="rank-heading" title="当前时段前 8 项，项目按完整工作目录分组；点击横条切换筛选">项目排行 · 前 8 项<button data-detail="proj">查看全部</button></h2><div id="byProject"></div></div>
+    <div class="card"><h2 class="rank-heading" title="当前时段前 8 项；点击横条切换 Agent 筛选">Agent 排行 · 前 8 项<button data-detail="agent">查看全部</button></h2><div id="byAgent"></div></div>
   </div>
 
   <div class="card">
-    <h2>会话明细<span id="sessCount"></span></h2>
+    <h2 class="rank-heading">项目 / 会话明细<span id="sessCount"></span><button data-detail="sessions">查看全部</button></h2>
     <div style="overflow-x:auto;max-height:480px;overflow-y:auto">
       <table>
         <thead><tr><th>项目</th><th>会话标题</th><th class="num">调用次数</th><th class="num">未缓存输入</th><th class="num">输出</th><th class="num">缓存读取</th><th class="num" title="包含未缓存输入、输出、缓存读取和缓存创建">Token 合计</th><th>最后调用</th></tr></thead>
@@ -259,20 +291,28 @@ footer code{color:var(--text)}
 </div>
 <div id="tooltip"></div>
 <div id="hmTip"><div class="t1"></div><div class="t2"></div></div>
-<div id="onboard">
+<dialog id="rankDetails" class="detail-dialog" aria-labelledby="detailTitle">
+  <h2 class="rank-heading"><span id="detailTitle"></span><button id="detailClose" aria-label="关闭详情">×</button></h2>
+  <p id="detailScope" class="range-info"></p>
+  <div class="detail-layout"><div id="detailTable" class="detail-table"></div><aside id="detailPie" class="detail-pie" aria-label="Token 占比"></aside></div>
+</dialog>
+<div id="settings" class="settings-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+  <div class="settings-card">
+    <h2 id="settingsTitle">设置<button id="settingsClose" aria-label="关闭设置">×</button></h2>
+    <label>主题 <select id="settingsTheme"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+    <div class="settings-section"><h3>监测的 Agent</h3><p class="range-info">勾选来源并填写日志目录。移除监测不会删除会话文件。</p><div id="settingsMonitors"></div><button id="addMonitor" style="margin-top:10px">添加其他目录</button></div>
+    <div class="settings-section"><h3>监测的模型</h3><label><input type="checkbox" id="allModels"> 自动监测所有模型（包含未来新模型）</label><div id="settingsModels" class="model-list"></div><div class="range-row"><input id="newModel" class="model-input" style="flex:1" placeholder="添加完整模型 ID，如 gpt-5 或 deepseek-chat"><button id="addModel">添加模型</button></div></div>
+    <div class="ob-err" id="settingsErr" role="status"></div>
+    <div class="settings-actions"><button id="settingsCancel">取消</button><button class="primary" id="settingsSave">保存设置</button></div>
+  </div>
+</div>
+<div id="onboard" role="dialog" aria-modal="true" aria-labelledby="onboardTitle">
   <div class="ob-card">
     <img src="/icon.png" class="ob-logo" alt="">
-    <h2>Kimi Code 用量监控</h2>
-    <p class="ob-sub">选择本机 Kimi Code 会话目录。监控只读取用量日志，不修改会话文件。</p>
-    <div class="ob-opt" id="obDefault">
-      <div class="ob-opt-head"><input type="radio" name="ob" id="obUseDefault" checked><span>使用检测到的默认位置</span></div>
-      <div class="ob-path" id="obDefaultPath"></div>
-      <div class="ob-stat" id="obDefaultStat"></div>
-    </div>
-    <div class="ob-opt" id="obCustom">
-      <div class="ob-opt-head"><input type="radio" name="ob" id="obUseCustom"><span>指定其他目录</span></div>
-      <input id="obInput" class="ob-input" placeholder="填写本机 sessions 目录的完整路径">
-    </div>
+    <h2 id="onboardTitle">Agent 用量监控</h2>
+    <p class="ob-sub">选择要监测的 Agent 和日志目录。只读取本地用量记录。</p>
+    <div id="obMonitors"></div>
+    <label style="display:block;margin:12px 0">主题 <select id="obTheme"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
     <div id="obErr" class="ob-err"></div>
     <button class="primary" id="obStart">开始使用</button>
   </div>
@@ -284,11 +324,13 @@ const $ = s => document.querySelector(s);
 const DATA = { sessions: [], records: [], generatedAt: 0, sessionsRoot: '' };
 let range = { start: null, end: null };   // null/null = 全部
 let curPreset = 'all';
-let fltModel = new Set(), fltProj = new Set();  // 模型/项目多选筛选（空集 = 不筛）
+let fltModel = new Set(), fltProj = new Set(), fltAgent = new Set();
 let barMode = 'type';                     // 趋势图着色：type=按类型 model=按模型
 let modelOrder = [];                      // 全量按用量降序的模型列表（保证配色稳定）
 const PALETTE = ['#58a6ff', '#3fb950', '#f0883e', '#a371f7', '#39c5cf', '#f778ba', '#d29922', '#8b949e'];
 const modelColor = m => PALETTE[Math.max(0, modelOrder.indexOf(m)) % PALETTE.length];
+const agentName = id => (DATA.agents || []).find(a => a.id === id)?.name || id;
+const agentColor = id => PALETTE[Math.max(0, (DATA.agents || []).findIndex(a => a.id === id)) % PALETTE.length];
 
 // ---------- 格式化 ----------
 const p2 = n => String(n).padStart(2, '0');
@@ -332,13 +374,8 @@ function resolvedTheme() {
 }
 function applyTheme() {
   document.documentElement.dataset.theme = resolvedTheme();
-  $('#themeBtn').textContent = '主题：' + ({ auto: '自动', light: '浅色', dark: '深色' })[getThemeMode()];
+  $('#settingsTheme').value = getThemeMode();
 }
-$('#themeBtn').addEventListener('click', () => {
-  const next = { auto: 'light', light: 'dark', dark: 'auto' }[getThemeMode()];
-  localStorage.setItem('kimi-theme', next);
-  applyTheme();
-});
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (getThemeMode() === 'auto') applyTheme(); });
 
 // ---------- UI 状态持久化 ----------
@@ -346,12 +383,12 @@ function saveUI() {
   localStorage.setItem('kimi-ui', JSON.stringify({
     preset: curPreset, from: $('#from').value, to: $('#to').value,
     gran: $('#gran').value, incCr: $('#includeCr').checked,
-    model: [...fltModel], proj: [...fltProj], hm: hmMode, bar: barMode,
+    model: [...fltModel], proj: [...fltProj], agent: [...fltAgent], hm: hmMode, bar: barMode,
   }));
 }
 
 // ---------- 模型/项目多选筛选 ----------
-function panelIdOf(which) { return which === 'model' ? '#msModelPanel' : '#msProjPanel'; }
+function panelIdOf(which) { return ({model:'#msModelPanel',proj:'#msProjPanel',agent:'#msAgentPanel'})[which]; }
 function refreshFilterOptions() {
   const models = new Map(), projs = new Map();
   for (const r of DATA.records) {
@@ -370,13 +407,24 @@ function refreshFilterOptions() {
   };
   build('#msModelPanel', models, fltModel, shortModel);
   build('#msProjPanel', projs, fltProj, shortPath);
+  const agents = new Map();
+  for (const a of DATA.agents || []) if ((DATA.monitors || []).some(m => m.agent === a.id && m.enabled)) agents.set(a.id, 0);
+  for (const r of DATA.records) agents.set(r.tool || 'kimi', (agents.get(r.tool || 'kimi') || 0) + 1);
+  for (const k of [...fltAgent]) if (!agents.has(k)) fltAgent.delete(k);
+  build('#msAgentPanel', agents, fltAgent, agentName);
   modelOrder = [...models.keys()];
   syncFilterControls();
 }
-function renderLegend() {
+function renderLegend(recs) {
   const lg = $('#legend');
-  if (barMode === 'model') {
-    lg.innerHTML = modelOrder.map(m => `<span><i style="background:${modelColor(m)}"></i>${esc(shortModel(m))}</span>`).join('');
+  const incCr = $('#includeCr').checked;
+  const visible = recs.filter(r => r.t > 0 && r.i + r.o + r.c + (incCr ? r.r : 0) > 0);
+  if (barMode === 'agent') {
+    const active = new Set(visible.map(r => r.tool || 'kimi'));
+    lg.innerHTML = (DATA.agents || []).filter(a => active.has(a.id)).map(a => `<span><i style="background:${agentColor(a.id)}"></i>${esc(a.name)}</span>`).join('');
+  } else if (barMode === 'model') {
+    const active = new Set(visible.map(r => r.m));
+    lg.innerHTML = modelOrder.filter(m => active.has(m)).map(m => `<span><i style="background:${modelColor(m)}"></i>${esc(shortModel(m))}</span>`).join('');
   } else {
     lg.innerHTML = `<span><i class="seg-out"></i>输出</span><span><i class="seg-in"></i>输入(未缓存)</span><span><i class="seg-cc"></i>缓存创建</span><span style="opacity:${$('#includeCr').checked ? 1 : .35}"><i class="seg-cr"></i>缓存读取</span>`;
   }
@@ -386,21 +434,22 @@ function syncFilterControls() {
   const pjLabel = set => set.size === 0 ? '全部' : set.size === 1 ? shortPath([...set][0]) : `已选 ${set.size} 项`;
   $('#msModelBtn').textContent = msLabel(fltModel);
   $('#msProjBtn').textContent = pjLabel(fltProj);
-  $('#fltClear').style.display = (fltModel.size || fltProj.size) ? '' : 'none';
+  $('#msAgentBtn').textContent = fltAgent.size === 0 ? '全部' : fltAgent.size === 1 ? agentName([...fltAgent][0]) : `已选 ${fltAgent.size} 项`;
+  $('#fltClear').style.display = (fltModel.size || fltProj.size || fltAgent.size) ? '' : 'none';
 }
 function togglePanel(which) {
-  const panels = ['#msModelPanel', '#msProjPanel'];
+  const panels = ['#msModelPanel', '#msProjPanel', '#msAgentPanel'];
   const target = panelIdOf(which);
   for (const p of panels) $(p).hidden = $(p).id !== target.slice(1) ? true : !$(p).hidden;
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('.mselect')) { $('#msModelPanel').hidden = true; $('#msProjPanel').hidden = true; }
+  if (!e.target.closest('.mselect')) { $('#msModelPanel').hidden = true; $('#msProjPanel').hidden = true; $('#msAgentPanel').hidden = true; }
 });
 function onPanelChange(panelSel, which) {
   $(panelSel).addEventListener('change', e => {
     const k = e.target.dataset.k;
     if (!k) return;
-    const set = which === 'model' ? fltModel : fltProj; // 动态取当前 Set
+    const set = which === 'model' ? fltModel : which === 'agent' ? fltAgent : fltProj;
     if (e.target.checked) set.add(k); else set.delete(k);
     syncFilterControls(); saveUI(); render();
   });
@@ -474,9 +523,11 @@ async function loadData() {
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     Object.assign(DATA, j);
+    $('#settingsBtn').disabled = false;
     refreshFilterOptions();
     maybeOnboard();
     $('#updated').textContent = '数据更新于 ' + new Date(j.generatedAt).toLocaleTimeString('zh-CN', { hour12: false });
+    if (j.warnings?.length) $('#updated').textContent += ` · ${j.warnings.length} 个来源读取异常，请查看设置`;
     render();
   } catch (e) { $('#updated').textContent = '加载失败: ' + e.message; }
 }
@@ -488,9 +539,10 @@ function render() {
   updatePresetRange();
   const { start, end } = range;
   const recsRange = DATA.records.filter(r => (!start || r.t >= start) && (!end || r.t < end));
-  const hasFilter = !!(fltModel.size || fltProj.size);
+  const hasFilter = !!(fltModel.size || fltProj.size || fltAgent.size);
   const recs = hasFilter ? recsRange.filter(r =>
     (!fltModel.size || fltModel.has(r.m)) &&
+    (!fltAgent.size || fltAgent.has(r.tool || 'kimi')) &&
     (!fltProj.size || fltProj.has((DATA.sessions[r.s] && DATA.sessions[r.s].cwd) || '(未知)'))
   ) : recsRange;
   const sum = { n: recs.length, i: 0, o: 0, r: 0, c: 0 };
@@ -509,6 +561,7 @@ function render() {
   const sTxt = range.start ? fmtTime(range.start) : '最早记录';
   const eTxt = range.end ? fmtTime(range.end) : '现在';
   const fparts = [];
+  if (fltAgent.size) fparts.push('Agent ' + [...fltAgent].map(agentName).join('、'));
   if (fltModel.size) fparts.push('模型 ' + (fltModel.size === 1 ? shortModel([...fltModel][0]) : `${fltModel.size} 项`));
   if (fltProj.size) fparts.push('项目 ' + (fltProj.size === 1 ? shortPath([...fltProj][0]) : `${fltProj.size} 项`));
   $('#rangeInfo').textContent = `当前时段：${sTxt} ~ ${eTxt}，共 ${fmtFull(sum.n)} 次 API 调用` +
@@ -517,7 +570,7 @@ function render() {
   const emptyText = hasFilter ? '该时段与筛选条件下没有 API 调用' : '该时段内没有 API 调用';
   $('#emptyNote').textContent = emptyText;
 
-  renderLegend();
+  renderLegend(recs);
   drawHeatmap();
   drawCharts(recs, sum.n);
   drawBreakdowns(recsRange);
@@ -525,47 +578,12 @@ function render() {
   $('#footer').innerHTML = '统计来自本地会话记录，仅供用量参考，不代表费用或剩余额度。';
 }
 
-// ---------- 数据目录管理 ----------
-function renderDirList(stats) {
-  const list = $('#dirList');
-  const rows = (stats || []).map(s => `<div class="hbar-row" style="margin-bottom:6px">
-    <div class="name" style="width:auto;max-width:420px;flex:none;text-align:left" title="${esc(s.path)}">${esc(s.path)}</div>
-    <div class="track" style="max-width:220px"><div class="fill" style="width:${Math.min(100, s.sessions * 8)}%;background:${s.ok ? 'var(--c-out)' : 'var(--c-cc)'}"></div></div>
-    <div class="val" style="width:auto">${s.ok ? `${s.sessions} 会话 · ${s.records} 条记录` : '路径不存在'}</div>
-    <button class="dir-del" data-p="${esc(s.path)}" title="移除此目录" style="padding:0 8px">×</button>
-  </div>`).join('');
-  list.innerHTML = rows || '<div class="range-info">尚未添加任何目录。</div>';
-}
-async function applyRoots(roots) {
-  const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roots }) });
-  const j = await r.json();
-  DATA.roots = j.roots;
-  renderDirList(j.stats);
-  await loadData();
-}
+// ---------- 数据目录管理（已统一到设置） ----------
 function initDirUi() {
-  $('#dirBtn').addEventListener('click', () => {
-    const p = $('#dirPanel');
-    const opening = p.style.display === 'none';
-    p.style.display = opening ? '' : 'none';
-    if (opening) applyRoots([...(DATA.roots || [])]); // 打开时实时获取各目录统计
-  });
-  $('#dirAdd').addEventListener('click', async () => {
-    const v = $('#dirInput').value.trim();
-    if (!v) return;
-    const roots = [...new Set([...(DATA.roots || []), v])];
-    $('#dirInput').value = '';
-    await applyRoots(roots);
-  });
-  $('#dirInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#dirAdd').click(); });
-  $('#dirList').addEventListener('click', async e => {
-    const b = e.target.closest('.dir-del'); if (!b) return;
-    await applyRoots((DATA.roots || []).filter(r => r !== b.dataset.p));
-  });
   $('#quitBtn').addEventListener('click', () => {
-    if (!confirm('退出 KimiMonitor？这会停止当前监控服务；关闭窗口不会停止后台监控。')) return;
+    if (!confirm('退出 Agent 用量监控？这会停止当前监控服务；关闭窗口不会停止后台监控。')) return;
     fetch('/api/quit', { method: 'POST' }).finally(() => {
-      document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;color:#8b949e;font-size:15px">请关闭此窗口。若后台监控仍在运行，请使用托盘“退出”或原启动方式对应的停止入口。下次使用时重新启动 KimiMonitor。</div>';
+      document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;color:#8b949e;font-size:15px">请关闭此窗口。若后台监控仍在运行，请使用托盘“退出”或原启动方式对应的停止入口。下次使用时重新启动监控。</div>';
     });
   });
 }
@@ -598,7 +616,8 @@ function drawCharts(recs, sumN) {
     let b = map.get(key); if (!b) b = map.set(key, b = { i: 0, o: 0, r: 0, c: 0, n: 0 }).get(key);
     b.i += r.i; b.o += r.o; b.r += r.r; b.c += r.c; b.n++;
     let bm = byModelMap.get(key); if (!bm) bm = byModelMap.set(key, bm = { by: new Map(), n: 0 }).get(key);
-    bm.by.set(r.m, (bm.by.get(r.m) || 0) + r.i + r.o + r.c + (incCr ? r.r : 0));
+    const group = barMode === 'agent' ? r.tool || 'kimi' : r.m;
+    bm.by.set(group, (bm.by.get(group) || 0) + r.i + r.o + r.c + (incCr ? r.r : 0));
     bm.n++;
     if (r.t < minT) minT = r.t; if (r.t > maxT) maxT = r.t;
   }
@@ -673,16 +692,17 @@ function drawCharts(recs, sumN) {
   $('#bars').innerHTML = arr.map(([k, b]) => {
     const total = b.o + b.i + b.c + (incCr ? b.r : 0);
     let inner;
-    if (barMode === 'model') {
+    if (barMode === 'model' || barMode === 'agent') {
       const bm = byModelMap.get(k);
-      inner = bm ? modelOrder.filter(m => bm.by.get(m) > 0)
-        .map(m => `<div style="height:${h(bm.by.get(m))}%;background:${modelColor(m)}"></div>`).join('') : '';
+      const order = barMode === 'agent' ? (DATA.agents || []).map(a => a.id) : modelOrder;
+      inner = bm ? order.filter(m => bm.by.get(m) > 0)
+        .map(m => `<div style="height:${h(bm.by.get(m))}%;background:${barMode === 'agent' ? agentColor(m) : modelColor(m)}"></div>`).join('') : '';
     } else {
       const seg = (cls, v) => v > 0 ? `<div class="${cls}" style="height:${h(v)}%"></div>` : '';
       inner = seg('seg-cr', incCr ? b.r : 0) + seg('seg-cc', b.c) + seg('seg-in', b.i) + seg('seg-out', b.o);
     }
     const bm = byModelMap.get(k);
-    const dataM = barMode === 'model' && bm ? ` data-m="${esc(JSON.stringify(Object.fromEntries(bm.by)))}"` : '';
+    const dataM = barMode !== 'type' && bm ? ` data-m="${esc(JSON.stringify(Object.fromEntries(bm.by)))}"` : '';
     return `<div class="bar" data-k="${k}" data-i="${b.i}" data-o="${b.o}" data-r="${b.r}" data-c="${b.c}" data-n="${b.n}"${dataM}>
       ${inner}
       ${total === 0 ? '<div style="height:2px;background:var(--empty)"></div>' : ''}
@@ -776,8 +796,8 @@ document.addEventListener('mousemove', e => {
   let rows;
   if (d.m) { // 按模型着色：逐模型分解
     const by = JSON.parse(d.m);
-    rows = modelOrder.filter(m => by[m]).map(m =>
-      `<div class="tt-row" style="color:${modelColor(m)}"><span>${esc(shortModel(m))}</span><b>${fmtFull(by[m])}</b></div>`).join('');
+    rows = Object.keys(by).filter(m => by[m]).map(m =>
+      `<div class="tt-row" style="color:${barMode === 'agent' ? agentColor(m) : modelColor(m)}"><span>${esc(barMode === 'agent' ? agentName(m) : shortModel(m))}</span><b>${fmtFull(by[m])}</b></div>`).join('');
     rows += `<div class="tt-row"><span>小计</span><b>${fmtFull(Object.values(by).reduce((s, v) => s + v, 0))}</b></div>`;
   } else {
     rows = `<div class="tt-row"><span>API 调用</span><b>${fmtFull(+d.n)}</b></div>
@@ -803,26 +823,82 @@ function hbars(el, entries, labeler, keyAttr, selSet) {
     <div class="val">${labeler(e)}</div>
   </div>`).join('');
 }
+let rankData = {model:[], proj:[], agent:[], sessions:[]}, detailKind = null;
+function aggregateRanking(recs, kind, incCr) {
+  const groups = new Map();
+  for (const r of recs) {
+    const sess = DATA.sessions[r.s] || {};
+    const key = kind === 'model' ? r.m : kind === 'agent' ? (r.tool || 'kimi') : kind === 'sessions' ? r.s : (sess.cwd || '(未知)');
+    const entry = groups.get(key) || {key, name:String(key), calls:0, i:0, o:0, r:0, c:0, last:0};
+    entry.calls++; entry.i += r.i; entry.o += r.o; entry.r += r.r; entry.c += r.c; entry.last = Math.max(entry.last, r.t);
+    groups.set(key, entry);
+  }
+  return [...groups.values()].map(e => {
+    const sess = DATA.sessions[e.key] || {};
+    const fullName = kind === 'sessions' ? (sess.title || '(无标题)') : kind === 'agent' ? agentName(e.key) : e.name;
+    const name = kind === 'model' ? shortModel(e.name) : kind === 'proj' ? shortPath(e.name) : fullName;
+    return {...e, name, fullName, weight:e.i + e.o + e.c + (incCr ? e.r : 0),
+      tip:`${fullName}\n调用 ${fmtFull(e.calls)} | 输入 ${fmtFull(e.i)} | 输出 ${fmtFull(e.o)} | 缓存读 ${fmtFull(e.r)} | 缓存创建 ${fmtFull(e.c)} | 总计 ${fmtFull(e.i + e.o + e.c + e.r)}`,
+      color:kind === 'agent' ? agentColor(e.key) : kind === 'proj' ? 'var(--c-out)' : 'var(--accent)'};
+  }).sort((a,b) => b.weight - a.weight || b.calls - a.calls || String(a.key).localeCompare(String(b.key)));
+}
 function drawBreakdowns(recsRange) {
   const incCr = $('#includeCr').checked;
-  const byModel = new Map(), byProj = new Map();
-  for (const r of recsRange) {
-    const m = byModel.get(r.m) || { name: r.m, calls: 0, i: 0, o: 0, r: 0, c: 0 };
-    m.calls++; m.i += r.i; m.o += r.o; m.r += r.r; m.c += r.c; byModel.set(r.m, m);
-    const cwd = (DATA.sessions[r.s] && DATA.sessions[r.s].cwd) || '(未知)';
-    const pr = byProj.get(cwd) || { name: cwd, calls: 0, i: 0, o: 0, r: 0, c: 0 };
-    pr.calls++; pr.i += r.i; pr.o += r.o; pr.r += r.r; pr.c += r.c; byProj.set(cwd, pr);
+  for (const [kind, id, selected] of [['model','byModel',fltModel], ['proj','byProject',fltProj], ['agent','byAgent',fltAgent]]) {
+    rankData[kind] = aggregateRanking(recsRange, kind, incCr);
+    hbars($('#' + id), rankData[kind].slice(0,8), e => `${fmtFull(e.calls)} 次 · ${fmt(e.weight)} tokens`, kind, selected);
   }
-  const mArr = [...byModel.values()].map(m => ({ key: m.name, name: shortModel(m.name), weight: m.i + m.o + m.c + (incCr ? m.r : 0), tip: `${m.name}\n调用 ${fmtFull(m.calls)} | 输入 ${fmtFull(m.i)} | 输出 ${fmtFull(m.o)} | 缓存读 ${fmtFull(m.r)} | 总计 ${fmtFull(m.i + m.o + m.c + m.r)}`, color: 'var(--accent)', _m: m }))
-    .sort((a, b) => b.weight - a.weight);
-  hbars($('#byModel'), mArr.slice(0, 8), e => `${fmtFull(e._m.calls)} 次 · ${fmt(e.weight)} tokens`, 'model', fltModel);
-  const pArr = [...byProj.values()].map(p => ({ key: p.name, name: shortPath(p.name), weight: p.i + p.o + p.c + (incCr ? p.r : 0), tip: `${p.name}\n调用 ${fmtFull(p.calls)} | 输入 ${fmtFull(p.i)} | 输出 ${fmtFull(p.o)} | 缓存读 ${fmtFull(p.r)} | 总计 ${fmtFull(p.i + p.o + p.c + p.r)}`, color: 'var(--c-out)', _p: p }))
-    .sort((a, b) => b.weight - a.weight);
-  hbars($('#byProject'), pArr.slice(0, 8), e => `${fmtFull(e._p.calls)} 次 · ${fmt(e.weight)} tokens`, 'proj', fltProj);
+}
+
+// 全量明细保留所有项目；饼图仅合并小占比项，不改变列表和统计。
+function pieSlices(entries) {
+  const total = entries.reduce((s,e) => s + e.weight, 0);
+  if (!total) return [];
+  const slices = [], other = {name:'其他', weight:0, count:0};
+  for (const e of entries) {
+    if (slices.length < 7 && e.weight / total >= .02) slices.push({name:e.fullName, weight:e.weight});
+    else if (e.weight > 0) { other.weight += e.weight; other.count++; }
+  }
+  if (other.weight) slices.push({...other, name:`其他（${other.count} 项）`});
+  return slices;
+}
+function renderDetails() {
+  if (!detailKind) return;
+  const entries = rankData[detailKind], isSessions = detailKind === 'sessions';
+  $('.detail-layout').classList.toggle('sessions-only', isSessions);
+  $('#detailPie').hidden = isSessions;
+  const titles = {model:'模型完整排行', proj:'项目完整排行', agent:'Agent 完整排行', sessions:'项目 / 会话完整明细'};
+  $('#detailTitle').textContent = `${titles[detailKind]} · ${entries.length} 项`;
+  $('#detailScope').textContent = isSessions
+    ? $('#rangeInfo').textContent + '；按 Token 合计排序，包含缓存读取。'
+    : '当前时段全部记录，不受模型 / 项目 / Agent 筛选影响；按 Token 用量排序。' + ($('#includeCr').checked ? '计入缓存读取。' : '不计入缓存读取。');
+  const total = entries.reduce((s,e) => s + e.weight, 0);
+  $('#detailTable').innerHTML = `<table><thead><tr><th>排名</th><th>${isSessions ? '项目 / 会话' : '名称'}</th><th class="num">调用次数</th><th class="num">未缓存输入</th><th class="num">输出</th><th class="num">缓存读取</th><th class="num">缓存创建</th><th class="num">${isSessions ? 'Token 合计' : '排行 Token'}</th><th class="num">占比</th></tr></thead><tbody>` + entries.map((e,i) => {
+    const sess = isSessions ? DATA.sessions[e.key] || {} : null;
+    const name = sess ? `<span class="badge">${esc(agentName(sess.tool || 'kimi'))}</span> ${esc(e.fullName)}<br><small>${esc(sess.cwd || '(未知)')} · ${esc(fmtTime(e.last))}</small>` : esc(e.fullName);
+    return `<tr><td>${i+1}</td><td class="detail-name">${name}</td><td class="num">${fmtFull(e.calls)}</td><td class="num">${fmtFull(e.i)}</td><td class="num">${fmtFull(e.o)}</td><td class="num">${fmtFull(e.r)}</td><td class="num">${fmtFull(e.c)}</td><td class="num"><b>${fmtFull(e.weight)}</b></td><td class="num">${pct(e.weight,total)}</td></tr>`;
+  }).join('') + (entries.length ? '' : '<tr><td colspan="9" class="empty">该时段与筛选条件下无数据</td></tr>') + '</tbody></table>';
+  if (isSessions) { $('#detailPie').innerHTML = ''; return; }
+  const slices = pieSlices(entries), colors = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f78166','#39c5cf','#db61a2','#8b949e'];
+  let cursor = 0;
+  const stops = slices.map((s,i) => { const start = cursor; cursor += s.weight / total * 100; return `${colors[i]} ${start}% ${cursor}%`; });
+  $('#detailPie').innerHTML = `<h3>Token 用量占比</h3>` + (slices.length
+    ? `<div class="pie-disc" role="img" aria-label="${esc(slices.map(s=>s.name + ' ' + pct(s.weight,total)).join('；'))}" style="background:conic-gradient(${stops.join(',')})"></div>` + slices.map((s,i)=>`<div class="pie-key" title="${fmtFull(s.weight)} tokens"><i style="background:${colors[i]}"></i><span>${esc(s.name)}</span><b>${pct(s.weight,total)}</b></div>`).join('') + '<p class="range-info">低于 2% 或超出前 7 项合并为“其他”；完整列表保留所有项目。</p>'
+    : '<div class="empty">暂无 Token 用量，无法计算占比</div>');
+}
+function initDetails() {
+  const dialog = $('#rankDetails');
+  document.querySelectorAll('[data-detail]').forEach(button => button.addEventListener('click', () => {
+    detailKind = button.dataset.detail; renderDetails(); dialog.showModal(); document.body.style.overflow = 'hidden';
+  }));
+  $('#detailClose').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => { detailKind = null; document.body.style.overflow = ''; });
+  dialog.addEventListener('click', e => { if (e.target === dialog) { const r = dialog.getBoundingClientRect(); if(e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
 }
 
 // ---------- 会话表 ----------
 function drawSessions(recs) {
+  rankData.sessions = aggregateRanking(recs, 'sessions', true);
   const bySess = new Map();
   for (const r of recs) {
     const s = bySess.get(r.s) || { calls: 0, i: 0, o: 0, r: 0, c: 0, last: 0 };
@@ -835,7 +911,7 @@ function drawSessions(recs) {
     const sess = DATA.sessions[si] || {};
     return `<tr>
       <td class="t-cwd" title="${esc(sess.cwd || '')}">${esc(shortPath(sess.cwd))}</td>
-      <td class="t-title" title="${esc(sess.title || '')}">${esc((sess.title || '(无标题)').slice(0, 60))}</td>
+      <td class="t-title" title="${esc(sess.title || '')}"><span class="badge">${esc(agentName(sess.tool || 'kimi'))}</span> ${esc((sess.title || '(无标题)').slice(0, 60))}</td>
       <td class="num">${fmtFull(s.calls)}</td>
       <td class="num">${fmt(s.i)}</td>
       <td class="num">${fmt(s.o)}</td>
@@ -844,38 +920,112 @@ function drawSessions(recs) {
       <td title="${fmtTime(s.last)}">${rel(s.last)}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="8" class="empty">该时段内没有 API 调用</td></tr>';
+  renderDetails();
 }
 
 // ---------- 首次运行引导 ----------
-function syncObSel() {
-  $('#obDefault').classList.toggle('sel', $('#obUseDefault').checked);
-  $('#obCustom').classList.toggle('sel', $('#obUseCustom').checked);
-}
 function maybeOnboard() {
   $('#onboard').style.display = DATA.setupDone ? 'none' : 'flex';
+  $('.wrap').inert = !DATA.setupDone || !$('#settings').hidden;
   if (DATA.setupDone) return;
-  const hasDefault = !!DATA.defaultOk;
-  $('#obDefault').style.display = hasDefault ? '' : 'none';
-  $('#obDefaultPath').textContent = DATA.defaultRoot || '';
-  const s = DATA.defaultStats;
-  $('#obDefaultStat').textContent = s ? `已检测到 ${s.sessions} 个会话 · ${s.records} 条用量记录` : '';
-  $('#obUseDefault').checked = hasDefault;
-  $('#obUseCustom').checked = !hasDefault;
-  syncObSel();
+  if (!$('#obMonitors').children.length) {
+    renderMonitors('#obMonitors', (DATA.agents || []).map(a => ({agent:a.id,root:a.defaultRoot,enabled:a.detected})));
+    $('#obTheme').value = getThemeMode();
+  }
 }
 function initOnboard() {
-  $('#obDefault').addEventListener('click', () => { $('#obUseDefault').checked = true; syncObSel(); });
-  $('#obCustom').addEventListener('click', () => { $('#obUseCustom').checked = true; syncObSel(); $('#obInput').focus(); });
-  $('#obInput').addEventListener('input', () => { $('#obUseCustom').checked = true; syncObSel(); });
   $('#obStart').addEventListener('click', async () => {
-    const useDefault = $('#obUseDefault').checked && DATA.defaultOk;
-    const p = useDefault ? DATA.defaultRoot : $('#obInput').value.trim();
-    if (!p) { $('#obErr').textContent = '请先输入目录路径'; return; }
-    const j = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roots: [p], setupDone: true }) }).then(r => r.json());
-    if (!j.roots.length) { $('#obErr').textContent = '该路径未被保存，请确认路径存在且当前用户可以访问。没有用量日志的目录会显示零条记录。'; return; }
-    DATA.roots = j.roots; DATA.setupDone = true;
-    $('#onboard').style.display = 'none';
-    await loadData();
+    $('#obStart').disabled = true;
+    try {
+      const monitors = readMonitors('#obMonitors');
+      await saveMonitoring({monitors,setupDone:true});
+      localStorage.setItem('kimi-theme', $('#obTheme').value); applyTheme();
+      $('#onboard').style.display = 'none'; await loadData();
+    } catch (e) { $('#obErr').textContent = e.message; }
+    finally { $('#obStart').disabled = false; }
+  });
+}
+
+// ---------- 设置：监测来源与模型白名单保存在服务端，主题保存在当前设备 ----------
+function renderMonitors(selector, configured) {
+  const rows = configured.slice();
+  for (const a of DATA.agents || []) if (!rows.some(m => m.agent === a.id)) rows.push({agent:a.id,root:a.defaultRoot,enabled:false});
+  $(selector).innerHTML = rows.map(m => {
+    const a = DATA.agents.find(a => a.id === m.agent);
+    const root = m.root || (!m.enabled ? a.defaultRoot : '');
+    const note = a.id === 'zcode' ? '优先读取 CLI db.sqlite；兼容 rollout model_io 日志' : a.id === 'dsh' ? `读取 v2–v4 会话 JSONL${a.compressedLogs ? '，支持 Zstandard 压缩' : '；压缩日志需 Node.js 22.15+ 或桌面版'}` : a.support === 'native' ? '直接读取本地会话 JSONL' : a.support === 'compatible' ? '兼容 Claude / WorkBuddy 风格 JSONL；不同版本需核对日志格式' : '需接入标准 usage.record JSONL；尚不支持原生私有日志';
+    const n = DATA.records.filter(r => r.tool === m.agent).length;
+    const warnings = (DATA.warnings || []).filter(w=>w.agent === m.agent && w.root === m.root).map(w=>w.error).join('；');
+    return `<div class="monitor-row" data-agent="${esc(m.agent)}"><label><input type="checkbox" ${m.enabled?'checked':''}>${esc(a.name)}</label><input class="monitor-path" aria-label="${esc(a.name)} 日志目录" value="${esc(root)}" placeholder="${a.support==='import'?'标准用量 JSONL 所在目录':'本机会话目录'}"><small>${note}${a.detected?' · 已发现默认目录':''}${DATA.setupDone && m.enabled ? ` · ${m.exists === false ? '目录不存在' : `${fmtFull(n)} 条记录（当前模型设置）`}` : ''}${warnings?` · 读取异常：${esc(warnings)}`:''}</small></div>`;
+  }).join('');
+}
+function readMonitors(selector) {
+  const rows = [...$(selector).querySelectorAll('.monitor-row')].map(row => ({agent:row.dataset.agent, root:row.querySelector('.monitor-path').value.trim(), enabled:row.querySelector('input[type=checkbox]').checked}));
+  if (rows.some(m => m.enabled && !m.root)) throw new Error('请为已勾选的 Agent 填写日志目录');
+  return rows;
+}
+async function saveMonitoring(config) {
+  const res = await fetch('/api/config', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+  const j = await res.json();
+  if (!res.ok || j.error) throw new Error(j.error || '保存失败');
+  Object.assign(DATA, j);
+}
+function addModelOption(model, checked) {
+  const label = document.createElement('label'), input = document.createElement('input');
+  input.type = 'checkbox'; input.value = model; input.checked = checked;
+  label.append(input, document.createTextNode(model)); $('#settingsModels').append(label);
+}
+function initSettings() {
+  let returnFocus;
+  const close = () => { $('#settings').hidden = true; $('.wrap').inert = !DATA.setupDone; document.body.style.overflow = ''; returnFocus?.focus(); };
+  $('#settingsBtn').addEventListener('click', () => {
+    returnFocus = document.activeElement;
+    renderMonitors('#settingsMonitors', DATA.monitors || []);
+    $('#settingsTheme').value = getThemeMode(); $('#settingsErr').textContent = '';
+    $('#allModels').checked = !(DATA.models || []).length;
+    $('#settingsModels').innerHTML = '';
+    const available = new Set([...(DATA.availableModels || []), ...DATA.records.map(r => r.m), ...(DATA.models || [])]);
+    for (const m of [...available].sort()) addModelOption(m, (DATA.models || []).includes(m));
+    $('#settings').hidden = false; $('.wrap').inert = true; document.body.style.overflow = 'hidden'; $('#settingsClose').focus();
+  });
+  $('#settingsClose').addEventListener('click', close); $('#settingsCancel').addEventListener('click', close);
+  $('#settings').addEventListener('click', e => { if(e.target === $('#settings')) close(); });
+  document.addEventListener('keydown', e => {
+    if ($('#settings').hidden) return;
+    if (e.key === 'Escape') close();
+    if (e.key === 'Tab') {
+      const items = [...$('#settings').querySelectorAll('button,input,select')].filter(el => !el.disabled);
+      const first = items[0], last = items[items.length-1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  $('#addMonitor').addEventListener('click', () => {
+    const row = document.createElement('div'); row.className = 'monitor-row';
+    row.innerHTML = `<select aria-label="Agent">${DATA.agents.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')}</select><input class="monitor-path" aria-label="其他日志目录" placeholder="填写另一个日志目录"><small>选择来源并填写路径。<button type="button" class="remove-extra">移除</button></small>`;
+    row.dataset.agent = DATA.agents[0].id;
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; check.hidden = true; row.append(check);
+    row.querySelector('select').addEventListener('change',e => row.dataset.agent = e.target.value);
+    row.querySelector('.remove-extra').addEventListener('click', () => row.remove());
+    $('#settingsMonitors').append(row); row.querySelector('.monitor-path').focus();
+  });
+  $('#addModel').addEventListener('click', () => {
+    const m = $('#newModel').value.trim(); if (!m) return;
+    const existing = [...$('#settingsModels').querySelectorAll('input')].find(i => i.value === m);
+    if (existing) existing.checked = true; else addModelOption(m,true);
+    $('#newModel').value = ''; $('#allModels').checked = false;
+  });
+  $('#settingsModels').addEventListener('change', () => $('#allModels').checked = false);
+  $('#settingsSave').addEventListener('click', async () => {
+    $('#settingsSave').disabled = true;
+    try {
+      const monitors = readMonitors('#settingsMonitors');
+      const models = $('#allModels').checked ? [] : [...$('#settingsModels').querySelectorAll('input:checked')].map(i=>i.value);
+      if (!$('#allModels').checked && !models.length) throw new Error('至少选择一个模型，或启用自动监测所有模型');
+      await saveMonitoring({monitors,models});
+      localStorage.setItem('kimi-theme', $('#settingsTheme').value); applyTheme(); close(); await loadData();
+    } catch(e) { $('#settingsErr').textContent = e.message; }
+    finally { $('#settingsSave').disabled = false; }
   });
 }
 
@@ -885,6 +1035,7 @@ function initOnboard() {
   // 多选弹层开关
   $('#msModelBtn').addEventListener('click', () => togglePanel('model'));
   $('#msProjBtn').addEventListener('click', () => togglePanel('proj'));
+  $('#msAgentBtn').addEventListener('click', () => togglePanel('agent'));
   // 横条行点击 = 加入/移出多选
   $('#byModel').addEventListener('click', e => {
     const row = e.target.closest('.hbar-row[data-model]'); if (!row) return;
@@ -898,8 +1049,14 @@ function initOnboard() {
     fltProj.has(k) ? fltProj.delete(k) : fltProj.add(k);
     refreshFilterOptions(); saveUI(); render();
   });
+  $('#byAgent').addEventListener('click', e => {
+    const row = e.target.closest('.hbar-row[data-agent]'); if (!row) return;
+    const k = row.dataset.agent;
+    fltAgent.has(k) ? fltAgent.delete(k) : fltAgent.add(k);
+    refreshFilterOptions(); saveUI(); render();
+  });
   $('#fltClear').addEventListener('click', () => {
-    fltModel.clear(); fltProj.clear();
+    fltModel.clear(); fltProj.clear(); fltAgent.clear();
     refreshFilterOptions(); saveUI(); render();
   });
 
@@ -909,11 +1066,15 @@ function initOnboard() {
   $('#includeCr').checked = ui.incCr === undefined ? true : !!ui.incCr; // 默认计入缓存读取
   fltModel = new Set(Array.isArray(ui.model) ? ui.model : []);
   fltProj = new Set(Array.isArray(ui.proj) ? ui.proj : []);
+  fltAgent = new Set(Array.isArray(ui.agent) ? ui.agent : []);
   onPanelChange('#msModelPanel', 'model');
   onPanelChange('#msProjPanel', 'proj');
+  onPanelChange('#msAgentPanel', 'agent');
   initHeatmapUi();
   initDirUi();
   initOnboard();
+  initSettings();
+  initDetails();
   if (ui.hm && ui.hm !== 'day') {
     hmMode = ui.hm;
     document.querySelectorAll('#hmModes .chip').forEach(x => x.classList.toggle('on', x.dataset.m === hmMode));
@@ -924,9 +1085,9 @@ function initOnboard() {
     document.querySelectorAll('#barModes .chip').forEach(x => x.classList.toggle('on', x === c));
     saveUI(); render();
   });
-  if (ui.bar === 'model') {
-    barMode = 'model';
-    document.querySelectorAll('#barModes .chip').forEach(x => x.classList.toggle('on', x.dataset.b === 'model'));
+  if (ui.bar === 'model' || ui.bar === 'agent') {
+    barMode = ui.bar;
+    document.querySelectorAll('#barModes .chip').forEach(x => x.classList.toggle('on', x.dataset.b === barMode));
   }
   if (ui.preset === 'custom' && (ui.from || ui.to)) {
     $('#from').value = ui.from || '';

@@ -1,6 +1,57 @@
-# KimiMonitor — Kimi Code 用量监控
+# Agent 用量监控（基于 KimiMonitor）
 
-KimiMonitor 读取本机 [Kimi Code](https://www.kimi.com/) 会话日志，统计模型调用次数和 token 用量，并提供趋势图、活动热力图、模型与项目筛选。统计包含子 agent 的用量记录，不用于计算费用。
+基于 [YFan945/kimi-usage-monitor](https://github.com/YFan945/kimi-usage-monitor) 扩展，沿用原有仪表盘、趋势柱状图和活动热力图。增加 Agent 多选、按 Agent 着色、首次来源引导，以及主题 / 监测来源 / 模型设置。Node 与 Rust/Tauri 共用界面，并分别实现相同的日志适配器。下方原项目 Release 下载链接是历史发行包，**不包含本次扩展**；本次改动请从源码运行或自行构建。
+
+## 多 Agent 监测
+
+### 桌面安装包构建
+
+应用图标源文件为 `assets/app-icon.png`，Windows ICO、macOS ICNS、托盘及网页图标均由该图片生成。桌面应用沿用 `KimiMonitor` 的安装名称和配置路径以兼容原项目。
+
+Windows 本机构建：先运行 `npm ci`，再运行 `npm run desktop -- --bundles nsis`，安装器位于 `src-tauri/target/release/bundle/nsis/`。
+
+macOS 构建需要 Mac：运行 `npm ci`，安装 Rust 的 `aarch64-apple-darwin` 与 `x86_64-apple-darwin` 目标，再运行 `npm run desktop -- --target universal-apple-darwin --bundles app,dmg`。DMG 位于 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`，支持 Apple Silicon 和 Intel。
+
+新仓库 [YFan945/UsageMonitor](https://github.com/YFan945/UsageMonitor) 的 Actions → Build desktop apps 支持手动构建两种安装包，产物在成功任务的 Artifacts 中下载。手动构建不创建 Release。安装包未配置代码签名和 macOS 公证；打包成功不等于已在所有目标系统完成安装、托盘和运行验收。
+
+```powershell
+node server.js --port 43111
+```
+
+访问 `http://127.0.0.1:43111`。默认端口仍为 `43110`；已有监控占用时可指定其他端口。Node 服务无需安装 npm 依赖，基础功能支持 Node.js 18+，**DSH 压缩日志需要 Node.js 22.15+ 的 Zstandard API，建议 Node.js 24**。Rust 桌面版自带 Zstandard 解码。
+
+| Agent | 接入方式 | 默认日志目录 |
+|---|---|---|
+| Kimi Code | 原生 `usage.record`，包含子 agent | `~/.kimi-code/sessions` |
+| Claude Code | 原生 `message.usage`，按响应 ID 去重流式记录 | `~/.claude/projects` |
+| Codex | 原生 `token_count`，累计值差分，跳过重复限额更新 | `~/.codex/sessions` |
+| ZCode | 优先只读 CLI `db.sqlite` 的 `model_usage` 与 `session` 表；兼容 `model_io` JSONL | `~/.zcode/cli/db`；旧 Node 使用 `~/.zcode/cli/rollout` |
+| WorkBuddy | `message.usage`，支持 `function_call`，按模型响应 ID 去重 | `~/.workbuddy/projects` |
+| CodeBuddy | 兼容 Claude / WorkBuddy 风格 JSONL；未做独立实机验收 | `~/.codebuddy/projects`（按实际版本调整） |
+| DeepSeek Harness | v2–v4 的 `assistant/message` / `assistant/attempt`；支持 `.jsonl.zstd`，只读最高格式代 | `~/.dsh/sessions` |
+| Doubao、Trae | 标准用量 JSONL 接入；**尚未实现原生日志 / 云端账户接口** | 在设置中指定标准日志目录 |
+
+首次引导会列出所有来源，勾选已发现原生目录的来源；可调整路径、勾选状态及主题，也可以暂不启用任何来源。路径存在但未记录用量时显示零条记录。设置可以给同一个 Agent 添加多个目录、禁用来源、添加完整模型 ID；“自动监测所有模型”会包含后来出现的新模型，否则只统计白名单中的模型。
+
+ZCode 数据库读取需要 Node.js 22.13+ 的 `node:sqlite`，Rust 桌面版自带 SQLite。推荐数据库入口以避免读取包含完整请求正文的大型 `model_io` 日志；同一来源不要同时启用数据库和 rollout 入口，它们可能是同源数据。只读取 `model_usage`，不叠加 `turn_usage` 或 `message` 表的 token，防止重复累计。某个来源数据库读取失败时，其他来源仍可统计，设置页显示原因。
+
+柱状图旁的 Agent / 模型 / 项目多选共同影响统计卡片、趋势与会话明细，选择为空表示全部。按 Agent 着色的柱状图可比较不同来源；会话明细显示来源标签。活动热力图仍显示所有已启用来源及模型设置下的全年数据，不受趋势筛选影响。
+
+模型、项目和 Agent 排行默认显示当前时段用量最高的前 8 项，点击“查看全部”可打开完整排行；横条仍支持加入 / 移出筛选。项目 / 会话明细默认显示调用最多的前 50 个会话，也可查看全部并按 Token 合计排序。会话详情仅显示完整明细表；三个排行榜的详情表旁提供 Token 占比饼图，低于 2% 或超出前 7 项的用量合并为“其他”，完整表格不截断。窄屏下饼图与表格上下排列。排行榜不受页面多选筛选影响，遵循“图表计入缓存读取”开关；会话详情遵循页面多选筛选，合计始终包含缓存读取，详情内注明统计口径。
+
+标准用量接入：把真实调用用量逐行写入 `.jsonl` 文件，选择 Doubao 或 Trae 等来源并配置文件所在目录。每次调用一行，`time` 为 Unix 毫秒或 ISO 日期；`inputOther` 不包含缓存读取 / 创建，`eventId` 在同一会话中唯一。下面仅为格式示例，不是实际用量：
+
+```json
+{"type":"usage.record","eventId":"call-001","sessionId":"session-001","time":1790935200000,"model":"model-id","cwd":"D:/project","usage":{"inputOther":100,"output":30,"inputCacheRead":200,"inputCacheCreation":0}}
+```
+
+监测目录、模型白名单及首次引导状态写入 `config.json`；旧版 `roots` 配置会显示为 Kimi 来源，保存新设置后迁移到 `monitors`。主题和图表筛选保存在当前浏览器 / WebView 的 localStorage，不跨设备同步。移除或禁用来源不会删除原日志，关闭所有来源后重启也不会自动恢复默认目录。Node 可用 `KIMI_MONITOR_CONFIG_DIR` 指定独立配置目录。
+
+统计只反映本地记录，不能代替服务商账单、套餐用量、剩余额度。未落盘的调用无法补算；CodeBuddy 的版本差异、DSH v0/v1 历史格式及损坏的压缩文件没有完整兼容保证。DSH 官方用量字段按互不重叠的输入 / 缓存口径统计，继承的 seed 历史不重复计入新会话；重试另计。
+
+验证命令：`npm test` 与 `cargo test --manifest-path src-tauri/Cargo.toml --locked`。新增合成数据测试覆盖多来源去重、模型白名单、禁用来源、配置持久化、ZCode / WorkBuddy 原生事件与 DSH 压缩、历史格式代和重试。源码浏览器验收不等同于安装包、托盘或 macOS 实机验收。
+
+## 原项目发行说明
 
 项目提供两条发行线，共享同一套界面：
 
@@ -48,9 +99,9 @@ Get-FileHash .\KimiMonitor-Setup-1.2.1.exe -Algorithm SHA256
 
 ## 开始使用
 
-1. 启动所选版本，首次引导会探测 `~/.kimi-code/sessions`。Windows 通常为 `C:\Users\<用户名>\.kimi-code\sessions`。
-2. 确认默认位置，或填写自己的会话目录。目录存在但没有可识别日志时，统计会显示为零。
-3. 进入界面后，使用“数据目录”添加或移除扫描路径，再选择时段、模型或项目。
+1. 源码扩展版的首次引导会探测上表中的原生来源目录。原版发行包仅探测 `~/.kimi-code/sessions`。
+2. 勾选来源并确认路径。目录存在但没有可识别日志时，统计会显示为零。
+3. 扩展版进入界面后使用“设置”调整来源、目录、模型与主题，再选择时段、Agent、模型或项目；原版包的目录入口为“数据目录”。
 
 支持以下目录布局；添加的是 `sessions` 或工作区目录，不是单个 `wire.jsonl` 文件：
 
@@ -59,7 +110,7 @@ sessions/<工作区>/<会话>/agents/<agent>/wire.jsonl
 工作区目录/<会话>/agents/<agent>/wire.jsonl
 ```
 
-重叠路径按会话真实路径去重，同一会话只统计一次。保存目录配置时，不存在的路径会被剔除。移除扫描路径只修改配置，不删除 Kimi Code 会话文件。
+Kimi 重叠路径按会话真实路径去重，同一会话只统计一次；其他来源按会话与用量事件标识去重。扩展版保存设置时拒绝已启用但不存在或不可读取的目录，并保留旧配置；旧版 `roots` 接口仍剔除不存在的路径。移除扫描路径只修改配置，不删除会话文件。
 
 ## 窗口、后台与退出
 

@@ -27,6 +27,13 @@ function makeSession(name, state, lines) {
 const event = count => JSON.stringify({ type: 'usage.record', time: 1700000000000,
   model: 'demo', usage: { inputOther: count, output: 5 } });
 
+function writeLog(relative, events) {
+  const file = path.join(fixture, relative);
+  fs.mkdirSync(path.dirname(file), {recursive:true});
+  fs.writeFileSync(file, events.map(e => typeof e === 'string' ? e : JSON.stringify(e)).join('\n'));
+  return path.dirname(file);
+}
+
 before(async () => {
   fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'kimi-monitor-test-'));
   root = path.join(fixture, 'sessions');
@@ -103,4 +110,129 @@ test('过大的配置请求返回 413，不修改配置', async () => {
 test('非法 URL 编码返回 400，后续请求仍然可用', async () => {
   assert.equal((await request('/%ZZ')).status, 400);
   assert.equal((await request('/api/data')).status, 200);
+});
+
+test('多 Agent 日志：流式去重、Codex 累计差分、子 agent 与重叠路径', async () => {
+  const assistant = (output, id='msg-1') => ({type:'assistant',sessionId:'claude-session',cwd:'claude-project',timestamp:'2026-10-02T10:00:00Z',message:{id,model:'claude-test',usage:{input_tokens:100,output_tokens:output,cache_read_input_tokens:20,cache_creation_input_tokens:5}}});
+  const claudeRoot = writeLog('claude/project/main.jsonl',[assistant(2),'{broken',assistant(7)]);
+  writeLog('claude/project/subagents/child.jsonl',[assistant(3,'msg-2')]);
+  const tc = (input,output,cached) => ({type:'event_msg',timestamp:'2026-10-02T10:00:00Z',payload:{type:'token_count',info:{total_token_usage:{input_tokens:input,output_tokens:output,cached_input_tokens:cached}}}});
+  const codexRoot = writeLog('codex/rollout.jsonl',[
+    {type:'session_meta',payload:{id:'codex-session',cwd:'codex-project'}},
+    {type:'turn_context',payload:{model:'gpt-test'}},tc(100,10,40),tc(100,10,40),tc(150,15,60),
+  ]);
+  const workbuddyRoot = writeLog('workbuddy/main.jsonl',[{...assistant(4),sessionId:'buddy-session',message:{id:'buddy-1',usage:{input_tokens:30,output_tokens:4,cache_read_input_tokens:8}},providerData:{model:'buddy-test'}}]);
+  const importRoot = writeLog('imports/log.jsonl',[{type:'usage.record',time:1700000000000,sessionId:'import-session',eventId:'call-1',model:'deepseek-test',usage:{inputOther:9,output:2}}]);
+  const monitors = [
+    {agent:'kimi',root,enabled:true},
+    {agent:'claude',root:claudeRoot,enabled:true},
+    {agent:'claude',root:path.dirname(claudeRoot),enabled:true},
+    {agent:'codex',root:codexRoot,enabled:true},
+    {agent:'workbuddy',root:workbuddyRoot,enabled:true},
+    ...['zcode','doubao','trae','dsh','codebuddy'].map(agent=>({agent,root:importRoot,enabled:agent!=='codebuddy'})),
+  ];
+  const res = await request('/api/config',{monitors,models:[],setupDone:true});
+  assert.equal(res.status,200);
+  const data = await (await request('/api/data')).json();
+  assert.equal(data.agents.length,9);
+  const claude = data.records.filter(r=>r.tool==='claude');
+  assert.equal(claude.length,2);
+  assert.equal(claude.reduce((n,r)=>n+r.o,0),10);
+  const codex = data.records.filter(r=>r.tool==='codex');
+  assert.equal(codex.length,2);
+  assert.deepEqual(codex.map(r=>[r.i,r.o,r.r]),[[60,10,40],[30,5,20]]);
+  assert.equal(data.records.filter(r=>r.tool==='workbuddy')[0].m,'buddy-test');
+  for (const agent of ['zcode','doubao','trae','dsh']) assert.equal(data.records.filter(r=>r.tool===agent).length,1);
+  for (const r of data.records) assert.equal(data.sessions[r.s].tool,r.tool);
+  assert.equal(data.records.some(r=>r.tool==='codebuddy'),false);
+  const again = await (await request('/api/data')).json();
+  assert.equal(again.records.length,data.records.length);
+});
+
+test('模型白名单、关闭来源及配置持久化', async () => {
+  const previous = await (await request('/api/data')).json();
+  let res = await request('/api/config',{monitors:previous.monitors,models:['gpt-test']});
+  assert.equal(res.status,200);
+  let data = await (await request('/api/data')).json();
+  assert.equal(data.records.length,2);
+  assert.ok(data.records.every(r=>r.m==='gpt-test'));
+  assert.ok(data.availableModels.includes('claude-test'));
+  const saved = JSON.parse(fs.readFileSync(path.join(fixture,'config.json'),'utf8'));
+  assert.deepEqual(saved.models,['gpt-test']);
+  res = await request('/api/config',{monitors:previous.monitors.map(m=>({...m,enabled:false})),models:[]});
+  assert.equal(res.status,200);
+  data = await (await request('/api/data')).json();
+  assert.equal(data.records.length,0);
+  assert.equal(data.roots.length,0);
+});
+
+test('非法监测来源、目录与模型配置被拒绝且保留旧配置', async () => {
+  const before = await (await request('/api/data')).json();
+  for (const body of [
+    {monitors:[{agent:'fake',root,enabled:true}]},
+    {monitors:[{agent:'codex',root,enabled:'yes'}]},
+    {monitors:[{agent:'codex',root:'',enabled:true}]},
+    {monitors:[{agent:'codex',root:path.join(fixture,'missing'),enabled:true}]},
+    {monitors:[],models:[1]},
+  ]) assert.equal((await request('/api/config',body)).status,400);
+  const after = await (await request('/api/data')).json();
+  assert.deepEqual(after.monitors,before.monitors);
+});
+
+test('WorkBuddy function_call 按响应去重；ZCode 原生 model_io；DSH 最新格式与重试', async () => {
+  const buddy = {type:'function_call',timestamp:'2026-10-02T10:00:00Z',sessionId:'buddy-native',message:{usage:{input_tokens:100,output_tokens:10,cache_read_input_tokens:40}},providerData:{messageId:'response-1',model:'buddy-native',rawUsage:{}}};
+  const buddyRoot = writeLog('buddy-native/main.jsonl',[{...buddy,id:'tool-1'},{...buddy,id:'tool-2'}]);
+  const zRoot = writeLog('zcode-native/model-io.jsonl',[{type:'model_io',completedAt:'2026-10-02T10:00:00Z',sessionId:'z-session',requestId:'req',attempt:0,response:{responseId:'z-response',modelId:'glm-test',usage:{inputTokens:100,outputTokens:10,totalTokens:110,cacheReadTokens:40}}}]);
+  const msg = (seq,output,type='assistant/message') => ({type,seq,time:1790935200000,data:{turn:1,step:1,message:{source:{model:'deepseek-native'}},stream:[{type:'chunk',chunk:{type:'usage',usage:{inputTokens:20,outputTokens:output,cacheReadTokens:80}}}]}});
+  const header = {type:'session',id:'dsh-native',version:4,cwd:'dsh-project'};
+  const dRoot = writeLog('dsh-native/session/session.v4.jsonl',[header,msg(1,3),{type:'session/end-seed',seq:2,time:1790935200000,data:{}},msg(3,4,'assistant/attempt'),msg(4,5),{type:'llm/retry-started',seq:5,time:1790935200000,data:{}},msg(6,6)]);
+  writeLog('dsh-native/session/session.v3.jsonl',[header,msg(1,999)]);
+  const monitors = [{agent:'workbuddy',root:buddyRoot,enabled:true},{agent:'zcode',root:zRoot,enabled:true},{agent:'dsh',root:path.dirname(dRoot),enabled:true}];
+  assert.equal((await request('/api/config',{monitors,models:[]})).status,200);
+  const data = await (await request('/api/data')).json();
+  const buddyRecords = data.records.filter(r=>r.tool==='workbuddy');
+  assert.equal(buddyRecords.length,1); assert.equal(buddyRecords[0].i,60);
+  const z = data.records.find(r=>r.tool==='zcode'); assert.deepEqual([z.i,z.o,z.r],[60,10,40]);
+  const d = data.records.filter(r=>r.tool==='dsh');
+  assert.equal(d.length,2);assert.equal(d.reduce((n,r)=>n+r.o,0),11);
+  assert.ok(d.every(r=>r.i===20 && r.r===80));
+  const zlib=require('node:zlib');
+  if (zlib.zstdCompressSync) {
+    fs.writeFileSync(path.join(dRoot,'session.v4.jsonl.zstd'),zlib.zstdCompressSync(fs.readFileSync(path.join(dRoot,'session.v4.jsonl'))));
+    fs.unlinkSync(path.join(dRoot,'session.v4.jsonl'));
+    await request('/api/config',{monitors,models:[]});
+    const compressed = await (await request('/api/data')).json();
+    assert.equal(compressed.records.filter(r=>r.tool==='dsh').reduce((n,r)=>n+r.o,0),11);
+  }
+});
+
+test('ZCode 只读数据库：缓存口径、同源重复入口及读取异常隔离', async t => {
+  let DatabaseSync; try { DatabaseSync = require('node:sqlite').DatabaseSync; } catch { t.skip('当前 Node 不提供内置 SQLite'); return; }
+  const dbRoot = path.join(fixture,'zcode-db');fs.mkdirSync(dbRoot,{recursive:true});
+  const file=path.join(dbRoot,'db.sqlite');const db=new DatabaseSync(file);
+  db.exec(`CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT);
+    CREATE TABLE model_usage(id TEXT PRIMARY KEY,session_id TEXT,model_id TEXT,agent TEXT,started_at INTEGER,completed_at INTEGER,input_tokens INTEGER,output_tokens INTEGER,cache_read_input_tokens INTEGER,cache_creation_input_tokens INTEGER);
+    INSERT INTO session VALUES('session','project','title');
+    INSERT INTO model_usage VALUES('call','session','glm','main',1790935200000,1790935200001,100,10,40,5);`);
+  db.close();const bytes=fs.readFileSync(file);
+  const monitors=[{agent:'zcode',root:dbRoot,enabled:true},{agent:'zcode',root:path.join(dbRoot,'.'),enabled:true}];
+  await request('/api/config',{monitors,models:[]});
+  const data=await (await request('/api/data')).json();
+  assert.equal(data.records.length,1);
+  assert.deepEqual([data.records[0].i,data.records[0].o,data.records[0].r,data.records[0].c],[55,10,40,5]);
+  assert.deepEqual(fs.readFileSync(file),bytes);
+  const broken=path.join(fixture,'broken-db');fs.mkdirSync(broken);fs.writeFileSync(path.join(broken,'db.sqlite'),'not a database');
+  await request('/api/config',{monitors:[...monitors,{agent:'zcode',root:broken,enabled:true}],models:[]});
+  const partial=await (await request('/api/data')).json();
+  assert.equal(partial.records.length,1);assert.equal(partial.warnings.length,1);
+});
+
+test('大型多字节 JSONL 跨读取块仍正确统计，损坏尾行不丢失前面的记录', async () => {
+  const nativeRoot=writeLog('long-log/session.jsonl',[
+    {type:'assistant',sessionId:'long-session',timestamp:'2026-10-02T10:00:00Z',message:{id:'large-response',model:'long-model',content:'汉字🙂'.repeat(40000),usage:{input_tokens:100,output_tokens:3}}},
+    '{"type":"assistant","message":{"usage":',
+  ]);
+  await request('/api/config',{monitors:[{agent:'claude',root:nativeRoot,enabled:true}],models:[]});
+  const data=await (await request('/api/data')).json();
+  assert.equal(data.records.length,1);assert.equal(data.records[0].o,3);
 });

@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+mod agents;
 
-const APP_TITLE: &str = "Kimi Code 用量监控";
+const APP_TITLE: &str = "Agent 用量监控";
 const PORT: u16 = 43110; // 优先端口；被占用时自动回退随机端口
 
 const INDEX_HTML: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../public/index.html"));
@@ -31,6 +32,7 @@ struct Rec {
     t: i64,
     m: String,
     a: String,
+    tool: String,
     i: i64,
     o: i64,
     r: i64,
@@ -42,14 +44,17 @@ struct Session {
     id: String,
     cwd: String,
     title: String,
+    tool: String,
     created_at: i64,
     updated_at: i64,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Config {
     roots: Vec<String>,
     setup_done: bool,
+    monitors: Option<Vec<Value>>,
+    models: Vec<String>,
 }
 
 #[derive(Default)]
@@ -65,6 +70,8 @@ struct Engine {
     // 800ms 限流：缓存的 /api/data 响应
     last_scan: Option<(Instant, String)>,
     default_probe: Option<(bool, Option<Value>)>,
+    agent_cache: HashMap<(String, PathBuf), (i64, u64, Vec<(String, String, Session, Rec)>)>,
+    scan_warnings: Vec<Value>,
 }
 
 fn now_ms() -> i64 {
@@ -76,8 +83,10 @@ fn token_count(v: &Value) -> i64 {
 }
 
 fn valid_config(body: &Value) -> bool {
-    body.get("roots").and_then(Value::as_array)
-        .map(|roots| roots.iter().all(Value::is_string)).unwrap_or(false)
+    (body.get("roots").is_some() || body.get("monitors").is_some())
+        && body.get("roots").map(|v| v.as_array().map(|a| a.iter().all(Value::is_string)).unwrap_or(false)).unwrap_or(true)
+        && body.get("monitors").map(agents::valid_monitors).unwrap_or(true)
+        && body.get("models").map(|v| v.as_array().map(|a| a.iter().all(Value::is_string)).unwrap_or(false)).unwrap_or(true)
         && body.get("setupDone").map(Value::is_boolean).unwrap_or(true)
 }
 
@@ -152,6 +161,8 @@ impl Engine {
                 if let Some(a) = j.get("roots").and_then(|v| v.as_array()) {
                     self.cfg.roots = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                 }
+                if agents::valid_monitors(&j["monitors"]) { self.cfg.monitors = Some(agents::normalize(j["monitors"].as_array().unwrap())); }
+                if let Some(a) = j["models"].as_array() { self.cfg.models = a.iter().filter_map(|v| v.as_str().map(String::from)).collect(); }
                 if let Some(b) = j.get("setupDone").and_then(|v| v.as_bool()) {
                     self.cfg.setup_done = b;
                 } else if !self.cfg.roots.is_empty() {
@@ -159,7 +170,7 @@ impl Engine {
                 }
             }
         }
-        if self.cfg.roots.is_empty() {
+        if self.cfg.roots.is_empty() && self.cfg.monitors.is_none() && !self.cfg.setup_done {
             let d = Self::default_root();
             if Path::new(&d).exists() {
                 self.cfg.roots.push(d); // 首次运行自动使用本机默认目录
@@ -169,10 +180,10 @@ impl Engine {
         self.cfg.roots.dedup();
     }
 
-    fn save_config(&self) {
-        let body = json!({"roots": self.cfg.roots, "setupDone": self.cfg.setup_done});
-        let _ = std::fs::create_dir_all(&self.config_dir);
-        let _ = std::fs::write(self.config_file(), serde_json::to_string_pretty(&body).unwrap_or_default());
+    fn save_config(&self) -> std::io::Result<()> {
+        let body = json!({"roots": self.cfg.roots, "setupDone": self.cfg.setup_done,"monitors":self.cfg.monitors,"models":self.cfg.models});
+        std::fs::create_dir_all(&self.config_dir)?;
+        std::fs::write(self.config_file(), serde_json::to_string_pretty(&body).unwrap_or_default())
     }
 
     // session_index.jsonl: sessionId -> workDir（state.json 缺 cwd 时的兜底）；
@@ -223,6 +234,7 @@ impl Engine {
                 t: ev.get("time").and_then(|v| v.as_i64()).unwrap_or(0),
                 m: ev.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
                 a: ev.get("agentId").and_then(|v| v.as_str()).unwrap_or("main").to_string(),
+                tool: "kimi".to_string(),
                 i: token_count(&u["inputOther"]),
                 o: token_count(&u["output"]),
                 r: token_count(&u["inputCacheRead"]),
@@ -255,6 +267,7 @@ impl Engine {
         let sess_idx = sessions.len();
         sessions.push(Session {
             id: sess_name.to_string(),
+            tool: "kimi".to_string(),
             cwd: state.as_ref()
                 .and_then(|s| s.get("cwd").and_then(|v| v.as_str()).map(String::from))
                 .or_else(|| index.get(sess_name).cloned())
@@ -315,6 +328,7 @@ impl Engine {
     }
 
     fn scan(&mut self) -> (Vec<Session>, Vec<Rec>) {
+        self.scan_warnings.clear();
         let mut seen: HashMap<PathBuf, ()> = HashMap::new();
         let mut seen_sessions = HashSet::new();
         let mut sessions = Vec::new();
@@ -322,6 +336,47 @@ impl Engine {
         for root in self.cfg.roots.clone() {
             self.scan_root(Path::new(&root), &mut sessions, &mut records, &mut seen, &mut seen_sessions);
         }
+        let mut event_ids = HashSet::new();
+        let mut agent_seen = HashSet::new();
+        for m in self.cfg.monitors.clone().unwrap_or_default() {
+            if m["enabled"] != true { continue; }
+            let agent = m["agent"].as_str().unwrap_or_default();
+            let root = Path::new(m["root"].as_str().unwrap_or_default());
+            if agent == "kimi" {
+                self.scan_root(root, &mut sessions, &mut records, &mut seen, &mut seen_sessions);
+                continue;
+            }
+            let database=root.join("db.sqlite");
+            if agent=="zcode" && database.exists() {
+                match agents::parse_zcode_database(&database) {
+                    Ok(data)=>for (sid,event,session,mut rec) in data {
+                        if !event_ids.insert(format!("{agent}:{event}")) {continue;}
+                        let si=sessions.iter().position(|s|s.tool==agent && s.id==sid).unwrap_or_else(||{sessions.push(session);sessions.len()-1});
+                        rec.s=si;records.push(rec);
+                    },
+                    Err(e)=>self.scan_warnings.push(json!({"agent":agent,"root":root,"error":e.to_string()}))
+                }
+                continue;
+            }
+            let files = agents::files(root);
+            let files = if agent == "dsh" {agents::select_dsh_files(files)} else {files};
+            for file in files {
+                let key = (agent.to_string(),file.clone());
+                agent_seen.insert(key.clone());
+                let Some(mtime) = file_mtime(&file) else { continue; };
+                let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+                let data = match self.agent_cache.get(&key) {
+                    Some((m,s,data)) if *m == mtime && *s == size => data.clone(),
+                    _ => { let data = agents::parse(&file,agent); self.agent_cache.insert(key,(mtime,size,data.clone())); data }
+                };
+                for (sid,event,session,mut rec) in data {
+                    if !event_ids.insert(format!("{agent}:{event}")) { continue; }
+                    let si = sessions.iter().position(|s| s.tool == agent && s.id == sid).unwrap_or_else(|| {sessions.push(session);sessions.len()-1});
+                    rec.s = si;records.push(rec);
+                }
+            }
+        }
+        self.agent_cache.retain(|k,_| agent_seen.contains(k));
         self.wire_cache.retain(|k, _| seen.contains_key(k));
         (sessions, records)
     }
@@ -347,11 +402,14 @@ impl Engine {
         let (sessions, records) = self.scan();
         let sessions_json: Vec<Value> = sessions
             .iter()
-            .map(|s| json!({"id": s.id, "cwd": s.cwd, "title": s.title, "createdAt": s.created_at, "updatedAt": s.updated_at}))
+            .map(|s| json!({"id": s.id, "cwd": s.cwd, "title": s.title,"tool":s.tool, "createdAt": s.created_at, "updatedAt": s.updated_at}))
             .collect();
+        let mut available_models: Vec<String> = records.iter().map(|r| r.m.clone()).collect();
+        available_models.sort();available_models.dedup();
         let records_json: Vec<Value> = records
             .iter()
-            .map(|r| json!({"s": r.s, "t": r.t, "m": r.m, "a": r.a, "i": r.i, "o": r.o, "r": r.r, "c": r.c}))
+            .filter(|r| self.cfg.models.is_empty() || self.cfg.models.contains(&r.m))
+            .map(|r| json!({"s": r.s, "t": r.t, "m": r.m, "a": r.a,"tool":r.tool, "i": r.i, "o": r.o, "r": r.r, "c": r.c}))
             .collect();
         // 引导期对默认目录做一次探测（与 server.js 一致）
         let default_root = Self::default_root();
@@ -370,6 +428,8 @@ impl Engine {
             "defaultStats": default_stats,
             "sessions": sessions_json,
             "records": records_json,
+            "agents":agents::catalog(),"monitors":self.monitors_json(),"models":self.cfg.models,"availableModels":available_models,
+            "warnings":self.scan_warnings,
         });
         let s = body.to_string();
         self.last_scan = Some((Instant::now(), s.clone()));
@@ -377,6 +437,17 @@ impl Engine {
     }
 
     fn apply_config(&mut self, body: &Value) -> String {
+        if let Some(monitors) = body["monitors"].as_array() {
+            for m in monitors {
+                if m["enabled"] == true {
+                    let root = m["root"].as_str().unwrap_or_default().trim();
+                    if root.is_empty() || !Path::new(root).is_dir() || std::fs::read_dir(root).is_err() {
+                        return json!({"error":format!("已启用的监测目录不存在或无法读取：{root}")}).to_string();
+                    }
+                }
+            }
+        }
+        let previous = self.cfg.clone();
         let mut roots: Vec<String> = body
             .get("roots")
             .and_then(|v| v.as_array())
@@ -392,17 +463,28 @@ impl Engine {
             .map(|(r, _)| r.clone())
             .collect();
         self.cfg.roots = ok_roots;
+        self.cfg.monitors = body["monitors"].as_array().map(|v| agents::normalize(v));
+        if let Some(models) = body["models"].as_array() {
+            self.cfg.models = models.iter().filter_map(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+            self.cfg.models.sort();self.cfg.models.dedup();
+        }
         match body.get("setupDone").and_then(|v| v.as_bool()) {
             Some(b) => self.cfg.setup_done = b,
             None => self.cfg.setup_done = self.cfg.setup_done || !self.cfg.roots.is_empty(),
         }
-        self.save_config();
+        if self.save_config().is_err() { self.cfg = previous; return json!({"error":"配置保存失败，请检查配置目录权限"}).to_string(); }
         self.wire_cache.clear();
+        self.agent_cache.clear();
         self.state_cache.clear();
         self.index_cache.clear();
         self.last_scan = None;
         self.default_probe = None;
-        json!({"ok": true, "roots": self.cfg.roots, "setupDone": self.cfg.setup_done, "stats": stats}).to_string()
+        json!({"ok": true, "roots": self.cfg.roots, "setupDone": self.cfg.setup_done, "stats": stats,"agents":agents::catalog(),"monitors":self.monitors_json(),"models":self.cfg.models}).to_string()
+    }
+
+    fn monitors_json(&self) -> Vec<Value> {
+        let rows = self.cfg.monitors.clone().unwrap_or_else(|| self.cfg.roots.iter().map(|root|json!({"agent":"kimi","root":root,"enabled":true})).collect());
+        rows.into_iter().map(|mut m| {m["exists"] = json!(Path::new(m["root"].as_str().unwrap_or_default()).is_dir());m}).collect()
     }
 }
 
@@ -508,7 +590,8 @@ fn handle_conn(mut stream: TcpStream, engine: std::sync::Arc<std::sync::Mutex<En
             return respond(&mut stream, "400 Bad Request", "application/json; charset=utf-8", json!({"error":"配置需要 roots 字符串数组及可选的 setupDone 布尔值"}).to_string().into_bytes());
         }
         let s = engine.lock().map(|mut e| e.apply_config(&j)).unwrap_or_else(|_| "{\"error\":\"配置暂时无法保存\"}".into());
-        return respond(&mut stream, "200 OK", "application/json; charset=utf-8", s.into_bytes());
+        let status = if serde_json::from_str::<Value>(&s).ok().and_then(|v|v.get("error").cloned()).is_some() { "400 Bad Request" } else { "200 OK" };
+        return respond(&mut stream, status, "application/json; charset=utf-8", s.into_bytes());
     }
     if path == "/api/open" && method == "POST" {
         show_main(&app);
@@ -637,7 +720,7 @@ mod tests {
         fn engine(&self) -> Engine {
             Engine {
                 config_dir: self.0.join("config"),
-                cfg: Config { roots: vec![self.0.join("sessions").to_string_lossy().to_string()], setup_done: true },
+                cfg: Config { roots: vec![self.0.join("sessions").to_string_lossy().to_string()], setup_done: true, ..Default::default() },
                 ..Engine::default()
             }
         }
@@ -713,5 +796,79 @@ mod tests {
         assert_eq!(data["defaultStats"]["cached"], true);
         engine.apply_config(&json!({"roots":[],"setupDone":true}));
         assert!(engine.default_probe.is_none());
+    }
+
+    #[test]
+    fn agent_adapters_deduplicate_and_keep_session_links() {
+        let f = Fixture::new();
+        let assistant = |n:i64| json!({"type":"assistant","sessionId":"s","timestamp":"2026-10-02T10:00:00Z","cwd":"project","message":{"id":"msg","model":"claude-test","usage":{"input_tokens":100,"output_tokens":n,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}).to_string();
+        f.write("claude/main.jsonl",&format!("{}\n{{bad\n{}",assistant(2),assistant(7)));
+        let token_event = |i:i64,o:i64,r:i64| json!({"type":"event_msg","timestamp":"2026-10-02T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":i,"output_tokens":o,"cached_input_tokens":r}}}}).to_string();
+        f.write("codex/main.jsonl",&format!("{}\n{}\n{}\n{}\n{}",json!({"type":"session_meta","payload":{"id":"c","cwd":"codex-project"}}),json!({"type":"turn_context","payload":{"model":"gpt-test"}}),token_event(100,10,40),token_event(100,10,40),token_event(150,15,60)));
+        f.write("imports/main.jsonl",&json!({"type":"usage.record","time":1700000000000i64,"eventId":"call","model":"deepseek-test","usage":{"inputOther":9,"output":2}}).to_string());
+        let mut e = f.engine();
+        let monitors = json!([
+            {"agent":"claude","root":f.0.join("claude"),"enabled":true},
+            {"agent":"codex","root":f.0.join("codex"),"enabled":true},
+            {"agent":"dsh","root":f.0.join("imports"),"enabled":true}
+        ]);
+        assert!(valid_config(&json!({"monitors":monitors})));
+        let result: Value = serde_json::from_str(&e.apply_config(&json!({"monitors":monitors,"setupDone":true}))).unwrap();
+        assert_eq!(result["ok"],true);
+        let data: Value = serde_json::from_str(&e.get_data_string()).unwrap();
+        let recs = data["records"].as_array().unwrap();
+        assert_eq!(recs.len(),4);
+        assert_eq!(recs.iter().find(|r|r["tool"]=="claude").unwrap()["o"],7);
+        let codex: Vec<_> = recs.iter().filter(|r|r["tool"]=="codex").collect();
+        assert_eq!(codex[0]["i"],60);assert_eq!(codex[1]["i"],30);
+        for r in recs {assert_eq!(data["sessions"][r["s"].as_u64().unwrap() as usize]["tool"],r["tool"]);}
+        e.apply_config(&json!({"monitors":monitors,"models":["gpt-test"]}));
+        let data: Value = serde_json::from_str(&e.get_data_string()).unwrap();
+        assert_eq!(data["records"].as_array().unwrap().len(),2);
+        assert!(data["availableModels"].as_array().unwrap().contains(&json!("claude-test")));
+        let reloaded = Engine::new(f.0.join("config"));
+        assert_eq!(reloaded.cfg.models,vec!["gpt-test"]);
+        e.apply_config(&json!({"monitors":[],"models":[]}));
+        let data: Value = serde_json::from_str(&e.get_data_string()).unwrap();
+        assert!(data["records"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_zcode_workbuddy_and_compressed_dsh() {
+        let f=Fixture::new();
+        let buddy=json!({"type":"function_call","sessionId":"buddy","timestamp":"2026-10-02T10:00:00Z","message":{"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40}},"providerData":{"messageId":"response","model":"buddy-test","rawUsage":{}}}).to_string();
+        f.write("buddy.jsonl",&format!("{buddy}\n{buddy}"));
+        let parsed=agents::parse(&f.0.join("buddy.jsonl"),"workbuddy");
+        assert_eq!(parsed.len(),1);assert_eq!(parsed[0].3.i,60);
+        f.write("zcode.jsonl",&json!({"type":"model_io","completedAt":"2026-10-02T10:00:00Z","sessionId":"z","response":{"responseId":"response","modelId":"glm-test","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":40}}}).to_string());
+        let parsed=agents::parse(&f.0.join("zcode.jsonl"),"zcode");
+        assert_eq!(parsed[0].3.i,60);assert_eq!(parsed[0].3.m,"glm-test");
+        let message=|n:i64| json!({"type":"assistant/message","time":1790935200000i64,"data":{"turn":1,"step":1,"message":{"source":{"model":"deepseek-test"}},"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":20,"outputTokens":n,"cacheReadTokens":80}}}]}}).to_string();
+        let text=format!("{}\n{}\n{}\n{}\n{}\n{}\n{}",json!({"type":"session","id":"dsh","version":4}),message(999),json!({"type":"session/end-seed"}),message(4),message(5),json!({"type":"llm/retry-started"}),message(6));
+        let compressed=zstd::stream::encode_all(text.as_bytes(),0).unwrap();
+        std::fs::write(f.0.join("session.v4.jsonl.zstd"),compressed).unwrap();
+        f.write("session.v3.jsonl",&text);
+        let files=agents::select_dsh_files(agents::files(&f.0));
+        assert!(!files.contains(&f.0.join("session.v3.jsonl")));
+        let parsed=agents::parse(&f.0.join("session.v4.jsonl.zstd"),"dsh");
+        assert_eq!(parsed.len(),2);
+        assert_eq!(parsed.iter().map(|x|x.3.o).sum::<i64>(),11);
+        assert!(parsed.iter().all(|x|x.3.i==20 && x.3.r==80));
+    }
+
+    #[test]
+    fn zcode_database_uses_readonly_usage_rows_and_cache_split() {
+        let f=Fixture::new();let file=f.0.join("db.sqlite");
+        let db=rusqlite::Connection::open(&file).unwrap();
+        db.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT);CREATE TABLE model_usage(id TEXT PRIMARY KEY,session_id TEXT,model_id TEXT,agent TEXT,started_at INTEGER,completed_at INTEGER,input_tokens INTEGER,output_tokens INTEGER,cache_read_input_tokens INTEGER,cache_creation_input_tokens INTEGER);INSERT INTO session VALUES('s','project','title');INSERT INTO model_usage VALUES('call','s','glm','main',1790935200000,1790935200001,100,10,40,5);").unwrap();
+        db.close().unwrap();let before=std::fs::read(&file).unwrap();
+        let parsed=agents::parse_zcode_database(&file).unwrap();
+        assert_eq!(parsed.len(),1);assert_eq!((parsed[0].3.i,parsed[0].3.o,parsed[0].3.r,parsed[0].3.c),(55,10,40,5));
+        assert_eq!(std::fs::read(&file).unwrap(),before);
+        let mut e=f.engine();
+        e.apply_config(&json!({"monitors":[{"agent":"zcode","root":f.0,"enabled":true}],"models":[]}));
+        let data:Value=serde_json::from_str(&e.get_data_string()).unwrap();
+        assert_eq!(data["records"].as_array().unwrap().len(),1);
+        assert_eq!(data["sessions"][0]["cwd"],"project");
     }
 }

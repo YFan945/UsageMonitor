@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,7 +39,7 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build (tauri)
-        run: npx tauri build ${{ matrix.target }}
+        run: npx tauri build --bundles ${{ matrix.os == 'windows-latest' && 'nsis' || 'app,dmg' }} ${{ matrix.target }}
 
       - name: Upload artifacts (Windows)
         if: matrix.os == 'windows-latest'
