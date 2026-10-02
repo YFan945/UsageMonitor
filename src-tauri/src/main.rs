@@ -698,6 +698,13 @@ fn migrate_legacy_config(target: &Path, legacy: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// 配置目录固定为 AgentMonitor，不跟随应用标识生成 com.yfan945.* 目录。
+fn renamed_config_dir(app_config_dir: Option<PathBuf>) -> PathBuf {
+    app_config_dir
+        .and_then(|dir| dir.parent().map(|parent| parent.join("AgentMonitor")))
+        .unwrap_or_else(|| PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AgentMonitor"))
+}
+
 fn main() {
     let engine = std::sync::Arc::new(std::sync::Mutex::new(Engine::new(PathBuf::from(""))));
 
@@ -706,12 +713,10 @@ fn main() {
             show_main(app);
         }))
         .setup(move |app| {
-            let config_dir = app
-                .path()
-                .app_config_dir()
-                .unwrap_or_else(|_| PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("AgentMonitor"));
+            let config_dir = renamed_config_dir(app.path().app_config_dir().ok());
             let _ = std::fs::create_dir_all(&config_dir);
             if let Some(parent) = config_dir.parent() {
+                migrate_legacy_config(&config_dir, &parent.join("com.yfan945.agentmonitor"))?;
                 migrate_legacy_config(&config_dir, &parent.join("com.yfan945.kimimonitor"))?;
             }
             {
@@ -780,6 +785,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_config_dir_drops_identifier_naming() {
+        let base = std::env::temp_dir().join("agentmonitor-config-dir-test");
+        assert_eq!(renamed_config_dir(Some(base.join("com.yfan945.agentmonitor"))), base.join("AgentMonitor"));
+    }
 
     #[test]
     fn renamed_config_migration_preserves_legacy_and_existing_settings() {

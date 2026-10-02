@@ -14,7 +14,8 @@ Windows 需要 WebView2；macOS 包未签名或公证。macOS 安装时打开 DM
 ## 主要功能
 
 - 本地监测 Kimi Code、Claude Code、Codex、ZCode、WorkBuddy 和 DeepSeek Harness；设置中管理来源、多个目录、模型白名单及主题。
-- 按时段、Agent、模型和项目筛选用量，查看趋势柱状图及全年活动热力图。
+- 按时段、Agent、模型和项目筛选用量，查看趋势柱状图及全年活动热力图；模型和项目筛选列表跟随所选时段，时段内未使用的不再出现，Agent 列表始终显示全部启用来源。
+- 桌面版配置目录固定为 AgentMonitor（Windows 为 %APPDATA%/AgentMonitor），首次启动自动从旧应用标识目录 com.yfan945.agentmonitor 复制配置。
 - 模型、项目和 Agent 完整排行提供 Token 占比图；模型和项目排行跟随 Agent 选择，会话明细保留完整列表。
 - 从日志及只读元数据库恢复会话标题，缺少正式标题时明确标注首条提问或子 Agent 名称。
 - 模型按厂商固定配色，柱状图、排行和饼图颜色一致；深色主题将 OpenAI 的黑色替换为白色，相邻同色柱块保留分隔线。

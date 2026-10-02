@@ -71,14 +71,14 @@ Codex 从日志目录附近最新的 state_<版本>.sqlite 读取 threads.title�
 
 | 运行方式 | 配置目录 |
 |---|---|
-| Windows 桌面版 | %APPDATA%/com.yfan945.agentmonitor |
-| macOS 桌面版 | ~/Library/Application Support/com.yfan945.agentmonitor |
+| Windows 桌面版 | %APPDATA%/AgentMonitor |
+| macOS 桌面版 | ~/Library/Application Support/AgentMonitor |
 | Node 源码版（Windows） | 项目目录 |
 | Node 源码版（macOS） | ~/Library/Application Support/AgentMonitor |
 
 Node 可通过 AGENT_MONITOR_CONFIG_DIR 指定独立配置目录，兼容旧的 KIMI_MONITOR_CONFIG_DIR。桌面版与 Node 版配置及浏览器设置不自动同步。升级前先退出旧应用；卸载可能保留配置。
 
-首次使用新目录时，桌面版会从同级旧目录 com.yfan945.kimimonitor 复制有效配置，macOS Node 默认目录会从旧 KimiMonitor 目录复制。主配置损坏时尝试旧备份；新目录已有配置或备份时不覆盖，旧文件保留。应用标识改变后 WebView 使用独立数据目录，主题和页面筛选可能需要重新选择。各 Agent 原始日志目录不受应用改名影响。
+首次使用新目录时，桌面版会从同级旧目录 com.yfan945.agentmonitor（旧应用标识目录）或 com.yfan945.kimimonitor 复制有效配置，macOS Node 默认目录会从旧 KimiMonitor 目录复制。主配置损坏时尝试旧备份；新目录已有配置或备份时不覆盖，旧文件保留。应用标识改变后 WebView 使用独立数据目录，主题和页面筛选可能需要重新选择。各 Agent 原始日志目录不受应用改名影响。
 
 ## 标准用量导入
 
