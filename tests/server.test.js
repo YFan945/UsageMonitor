@@ -53,7 +53,7 @@ before(async () => {
   child = spawn(seaExecutable || process.execPath,
     [...(seaExecutable ? [] : [path.join(fixture, 'server.js')]), '--port', String(port)], {
     cwd: fixture, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, HOME: fixture, USERPROFILE: fixture, KIMI_NO_TRAY: '1', KIMI_NO_OPEN: '1', KIMI_NO_SHORTCUT: '1' },
+    env: { ...process.env, HOME: fixture, USERPROFILE: fixture, KIMI_MONITOR_CONFIG_DIR: fixture, KIMI_NO_TRAY: '1', KIMI_NO_OPEN: '1', KIMI_NO_SHORTCUT: '1' },
   });
   let logs = '';
   child.stdout.on('data', data => { logs += data; });
