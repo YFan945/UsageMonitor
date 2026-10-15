@@ -1,33 +1,34 @@
-# AgentMonitor v1.0.0 — 多 Agent 用量监控
+# AgentMonitor v1.4.0 — OpenCode 接入与用量历史保存
 
-本项目的首个独立版本。通过本机会话日志查看多种 Agent 的模型调用次数与 Token 用量，提供 Windows 安装器和 macOS 双架构 DMG，安装后无需 Node.js 或 Rust。
+新增 OpenCode 原生用量监测，并为所有来源保存已采集的历史。源日志被清理或应用重启后，已成功落盘的 Token 记录仍可查看。
 
 ## 下载
 
 | 平台 | 安装包 |
 |---|---|
-| Windows x64 | [AgentMonitor_1.0.0_x64-setup.exe](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_x64-setup.exe) |
-| macOS Apple Silicon / Intel | [AgentMonitor_1.0.0_universal.dmg](https://github.com/YFan945/UsageMonitor/releases/download/v1.0.0/AgentMonitor_1.0.0_universal.dmg) |
+| Windows x64 | [AgentMonitor_1.4.0_x64-setup.exe](https://github.com/YFan945/UsageMonitor/releases/download/v1.4.0/AgentMonitor_1.4.0_x64-setup.exe) |
+| macOS Apple Silicon / Intel | [AgentMonitor_1.4.0_universal.dmg](https://github.com/YFan945/UsageMonitor/releases/download/v1.4.0/AgentMonitor_1.4.0_universal.dmg) |
 
-Windows 需要 WebView2；macOS 包未签名或公证。macOS 安装时打开 DMG，将 AgentMonitor 拖入“应用程序”。
+安装后无需 Node.js 或 Rust。Windows 需要 WebView2；macOS 包未签名或公证，打开 DMG 后将应用拖入“应用程序”。
 
-## 主要功能
+## 新增与修复
 
-- 本地监测 Kimi Code、Claude Code、Codex、ZCode、WorkBuddy 和 DeepSeek Harness；设置中管理来源、多个目录、模型白名单及主题。
-- 按时段、Agent、模型和项目筛选用量，查看趋势柱状图及全年活动热力图；模型和项目筛选列表跟随所选时段，时段内未使用的不再出现，Agent 列表始终显示全部启用来源。
-- 桌面版配置目录固定为 AgentMonitor（Windows 为 %APPDATA%/AgentMonitor），首次启动自动从旧应用标识目录 com.yfan945.agentmonitor 复制配置。
-- 模型、项目和 Agent 完整排行提供 Token 占比图；模型和项目排行跟随 Agent 选择，会话明细保留完整列表。
-- 从日志及只读元数据库恢复会话标题，缺少正式标题时明确标注首条提问或子 Agent 名称。
-- 模型按厂商固定配色，柱状图、排行和饼图颜色一致；深色主题将 OpenAI 的黑色替换为白色，相邻同色柱块保留分隔线。
-- 支持 DSH 拼接压缩帧与恢复事件，处理流式用量、累计快照、重叠目录与继承会话，减少漏计和重复计数。
-- 原生窗口和托盘支持后台监测；关闭窗口的行为可在设置中选择：直接关闭应用、后台运行（默认）或每次询问，托盘菜单“退出”始终彻底退出。
+- **OpenCode**：设置和首次引导中可选择 OpenCode，默认读取 `~/.local/share/opencode`，遵循 `XDG_DATA_HOME`。只读支持新旧 SQLite 消息表（`message`、`session_message`）及旧版 JSON 会话存储，识别模型、子 Agent、缓存读取和写入，不叠加 `part` 或会话汇总；个别损坏消息不影响其他可读记录。
+- **用量历史**：启动后自动采集，此后每 30 秒后台扫描；成功扫描的新增或更新记录立即写入配置目录的 `usage-history.json`。关闭窗口隐藏到后台后继续采集，完全退出后停止。
+- **恢复与去重**：日志被删除或轮换后保留已保存的记录，重启自动恢复。累计快照先归档再求差，避免 Codex 重复累计；同一消息的流式用量更新合并到原记录。
+- **可靠保存**：临时文件写入并同步磁盘后替换主文件，保留 `.bak` 备份；主文件损坏时尝试恢复备份，保存失败直接显示原因并在后续扫描重试。
+- **筛选**：模型白名单仅筛选显示，历史完整采集。禁用来源或移除目录只隐藏对应历史，重新启用原目录可恢复显示。
 
-## 接入范围与验证
+## 升级与数据
 
-CodeBuddy 提供兼容日志适配，仍需核对具体版本。Doubao、Trae / Trae CN 目前需要导入标准 usage.record JSONL，尚不支持原生私有日志或账户用量接口。
+沿用原配置目录和设置，无需手动迁移。历史保存从升级后的首次成功采集开始，无法补回此前已删除或未记录用量的调用。备份时请同时保存 `usage-history.json` 及 `.bak`，不要只保存 `config.json`。
 
-应用只读取本地日志。Token 合计用于用量参考，不代表费用、套餐消耗或剩余额度；没有落盘的调用无法补算。
+Node 源码服务建议使用 Node.js 24，OpenCode SQLite 读取需要内置 `node:sqlite`；桌面版内置数据库支持。Node/SEA 维护版安装器独立管理版本，本次发行提供 Rust/Tauri 桌面安装包。
 
-本版本通过 Node 18/24 回归检查、Rust 单元测试及 Windows、macOS 双架构构建。构建成功不等同于所有系统版本的安装、窗口和托盘实机验收。
+## 验证与范围
 
-详细设置、目录与统计口径见 [README](https://github.com/YFan945/UsageMonitor#readme)。AgentMonitor 与 KimiMonitor 均由 YFan945 开发，分别管理版本与发行。本项目使用 MIT License。
+本地 Node 31 项、Rust 17 项测试通过，覆盖新旧 OpenCode、只读数据库、后台定时采集、删除日志与重启恢复、模型及来源筛选、备份恢复和保存失败重试；本机 OpenCode 数据也通过只读解析核验。Windows 和 macOS 双架构安装包由发布流水线构建。构建成功不等同于所有系统版本的安装、窗口和托盘实机验收。
+
+CodeBuddy 仍为兼容日志适配；Doubao、Trae / Trae CN 仍需标准 `usage.record` JSONL 导入。Token 统计用于本地用量参考，不代表费用、套餐消耗或剩余额度。
+
+详细说明见 [README](https://github.com/YFan945/UsageMonitor#readme)。AgentMonitor 与 KimiMonitor 均由 YFan945 开发，分别管理版本与发行，使用 MIT License。

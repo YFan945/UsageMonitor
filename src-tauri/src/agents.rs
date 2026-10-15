@@ -8,13 +8,14 @@ pub fn catalog() -> Vec<Value> {
     [
         ("kimi", "Kimi Code", ".kimi-code/sessions", "native"),
         ("claude", "Claude Code", ".claude/projects", "native"),
+        ("opencode", "OpenCode", ".local/share/opencode", "native"),
         ("codex", "Codex", ".codex/sessions", "native"),
         ("workbuddy", "WorkBuddy", ".workbuddy/projects", "native"),
         ("codebuddy", "CodeBuddy", ".codebuddy/projects", "compatible"),
         ("zcode", "ZCode", ".zcode/cli/db", "native"), ("doubao", "Doubao", "", "import"),
         ("trae", "Trae", "", "import"), ("dsh", "DeepSeek Harness", ".dsh/sessions", "native"),
     ].into_iter().map(|(id, name, dir, support)| {
-        let root = if dir.is_empty() { String::new() } else { if id=="dsh" {std::env::var("DSH_HOME").ok().filter(|p|!p.trim().is_empty()).map(|p|Path::new(&p).join("sessions")).unwrap_or_else(||Path::new(&home).join(dir)).to_string_lossy().to_string()} else {Path::new(&home).join(dir).to_string_lossy().to_string()} };
+        let root = if id=="opencode" {std::env::var("XDG_DATA_HOME").map(|p|Path::new(&p).join("opencode")).unwrap_or_else(|_|Path::new(&home).join(dir)).to_string_lossy().to_string()} else if dir.is_empty() { String::new() } else { if id=="dsh" {std::env::var("DSH_HOME").ok().filter(|p|!p.trim().is_empty()).map(|p|Path::new(&p).join("sessions")).unwrap_or_else(||Path::new(&home).join(dir)).to_string_lossy().to_string()} else {Path::new(&home).join(dir).to_string_lossy().to_string()} };
         json!({"id":id,"name":name,"support":support,"defaultRoot":root,"detected":!root.is_empty() && Path::new(&root).is_dir(),"compressedLogs":true})
     }).collect()
 }
@@ -121,7 +122,7 @@ pub fn parse(file: &Path, agent: &str) -> std::io::Result<Vec<(String, String, S
         let r = token_count(pick(&u, &["inputCacheRead", "cache_read_input_tokens", "cached_input_tokens", "cacheReadTokens"]));
         let c = token_count(pick(&u, &["inputCacheCreation", "cache_creation_input_tokens", "cache_write_input_tokens", "cacheWriteTokens"]));
         let input = token_count(pick(&u, &["inputOther", "input_tokens", "inputTokens"]));
-        let mut rec = Rec {s:0,t,m:model.clone(),tool:agent.to_string(),a:e["agentId"].as_str().unwrap_or("main").to_string(),i:input,inclusive,o:token_count(pick(&u, &["output", "output_tokens", "outputTokens"])),r,c};
+        let mut rec = Rec {key:key.clone(),origin:file.to_string_lossy().to_string(),s:0,t,m:model.clone(),tool:agent.to_string(),a:e["agentId"].as_str().unwrap_or("main").to_string(),i:input,inclusive,o:token_count(pick(&u, &["output", "output_tokens", "outputTokens"])),r,c};
         if agent != "dsh" { if let Some(i) = indices.get(&key) { let old: &(String,String,Session,Rec) = &out[*i];rec.i=rec.i.max(old.3.i);rec.o=rec.o.max(old.3.o);rec.r=rec.r.max(old.3.r);rec.c=rec.c.max(old.3.c);rec.inclusive |= old.3.inclusive;if agent=="codex" && old.3.t<rec.t {rec.t=old.3.t;rec.m=old.3.m.clone();rec.a=old.3.a.clone();} } }
         let session = Session {id:sid.clone(),cwd:cwd.clone(),title:labels.get(&sid).cloned().unwrap_or_default(),tool:agent.to_string(),created_at:t,updated_at:t};
         let entry = (sid,key.clone(),session,rec);
@@ -174,7 +175,7 @@ pub fn parse_zcode_database(file: &Path) -> Result<Vec<(String,String,Session,Re
         let count=|i:usize| -> Result<i64,rusqlite::Error> {Ok(token_count(&json!(row.get::<_,i64>(i)?)))};
         let r=count(8)?;let c=count(9)?;
         let session=Session {id:sid.clone(),cwd:row.get::<_,Option<String>>(10)?.unwrap_or_default(),title:row.get::<_,Option<String>>(11)?.unwrap_or_default(),tool:"zcode".into(),created_at:t,updated_at:t};
-        let rec=Rec {s:0,t,m:row.get(2)?,a:row.get::<_,Option<String>>(3)?.unwrap_or_else(||"main".into()),tool:"zcode".into(),i:count(6)?,inclusive:true,o:count(7)?,r,c};
+        let rec=Rec {key:format!("{sid}:{event}"),origin:file.to_string_lossy().to_string(),s:0,t,m:row.get(2)?,a:row.get::<_,Option<String>>(3)?.unwrap_or_else(||"main".into()),tool:"zcode".into(),i:count(6)?,inclusive:true,o:count(7)?,r,c};
         Ok((sid.clone(),format!("{sid}:{event}"),session,rec))
     })?;
     rows.collect()
@@ -223,4 +224,66 @@ pub fn enrich_titles(sessions: &mut [Session],monitors: &[Value],warnings: &mut 
             let Some(parent)=dir.parent() else {break;};dir=parent.to_path_buf();
         }
     }
+}
+
+/// OpenCode 新旧消息表汇总用量；不叠加 part 的 step-finish。
+pub fn parse_opencode(root: &Path, warnings: &mut Vec<Value>) -> rusqlite::Result<Vec<(String,String,Session,Rec)>> {
+    let mut sessions: HashMap<String,Session>=HashMap::new();
+    let mut messages: Vec<(Value,String)>=Vec::new();
+    let file=root.join("opencode.db");
+    if file.exists() {
+        let db=rusqlite::Connection::open_with_flags(&file,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let tables:std::collections::HashSet<String>=db.prepare("SELECT name FROM sqlite_master WHERE type='table'")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        if !tables.contains("message") && !tables.contains("session_message") {return Err(rusqlite::Error::InvalidParameterName("不支持的 OpenCode 数据库结构：缺少消息表".into()));}
+        for table in ["session","session_v2"].iter().filter(|t|tables.contains(**t)) {
+            let mut stmt=db.prepare(&format!("SELECT id,directory,title FROM {table}"))?;
+            for row in stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?)))? {
+                let (id,cwd,title)=row?;sessions.insert(id.clone(),Session{id,cwd:cwd.unwrap_or_default(),title:title.unwrap_or_default(),tool:"opencode".into(),created_at:0,updated_at:0});
+            }
+        }
+        for table in ["message","session_message"].iter().filter(|t|tables.contains(**t)) {
+            let modern=*table=="session_message";
+            let mut stmt=db.prepare(&format!("SELECT id,session_id,data,{} FROM {table}",if modern {"type"} else {"NULL"}))?;
+            for row in stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))? {
+                let (id,sid,data,role)=row?;
+                let mut data:Value=match serde_json::from_str(&data) {Ok(v)=>v,Err(e)=>{warnings.push(json!({"agent":"opencode","root":root,"file":file,"error":format!("{table}/{id}：{e}")}));continue;}};
+                if !data.is_object() {warnings.push(json!({"agent":"opencode","root":root,"file":file,"error":format!("{table}/{id}：消息格式无效")}));continue;}
+                data["id"]=json!(id);data["sessionID"]=json!(sid);if let Some(role)=role {data["role"]=json!(role);}
+                messages.push((data,file.to_string_lossy().to_string()));
+            }
+        }
+    } else {
+        fn walk(dir:&Path,root:&Path,depth:usize,out:&mut Vec<(Value,String)>,warnings:&mut Vec<Value>) -> std::io::Result<()> {
+            if !dir.exists() || depth>4 {return Ok(());}
+            for entry in std::fs::read_dir(dir)? {
+                let entry=entry?;let kind=entry.file_type()?;let p=entry.path();
+                if kind.is_dir() {if let Err(e)=walk(&p,root,depth+1,out,warnings) {warnings.push(json!({"agent":"opencode","root":root,"file":p,"error":e.to_string()}));}}
+                else if kind.is_file() && p.extension().map(|e|e=="json").unwrap_or(false) {
+                    match std::fs::read(&p).and_then(|b|serde_json::from_slice(&b).map_err(std::io::Error::from)) {
+                        Ok(data)=>out.push((data,p.to_string_lossy().to_string())),
+                        Err(e)=>warnings.push(json!({"agent":"opencode","root":root,"file":p,"error":e.to_string()})),
+                    }
+                }
+            } Ok(())
+        }
+        let io_error=|e:std::io::Error|rusqlite::Error::ToSqlConversionFailure(Box::new(e));
+        if !root.exists() {return Err(io_error(std::io::Error::new(std::io::ErrorKind::NotFound,"OpenCode 数据目录不存在")));}
+        let storage=if root.join("storage").exists() {root.join("storage")} else {root.to_path_buf()};
+        let mut metadata=Vec::new();walk(&storage.join("session"),root,0,&mut metadata,warnings).map_err(io_error)?;
+        for (v,_) in metadata {if let Some(id)=v["id"].as_str() {sessions.insert(id.into(),Session{id:id.into(),cwd:v["directory"].as_str().unwrap_or_default().into(),title:v["title"].as_str().unwrap_or_default().into(),tool:"opencode".into(),created_at:to_epoch(&v["time"]["created"]),updated_at:to_epoch(&v["time"]["updated"])});}}
+        walk(&storage.join("message"),root,0,&mut messages,warnings).map_err(io_error)?;
+    }
+    let mut out=Vec::new();
+    for (m,origin) in messages {
+        if m["role"]!="assistant" {continue;}
+        let (Some(id),Some(sid))=(m["id"].as_str(),m["sessionID"].as_str()) else {continue;};
+        let t=to_epoch(if token_count(&m["time"]["completed"])>0 {&m["time"]["completed"]} else {&m["time"]["created"]});
+        let u=&m["tokens"];let i=token_count(&u["input"]);let o=token_count(&u["output"]);let r=token_count(&u["cache"]["read"]);let c=token_count(&u["cache"]["write"]);
+        if t<=0 || i+o+r+c==0 {continue;}
+        let session=sessions.entry(sid.into()).or_insert_with(||Session{id:sid.into(),cwd:m["path"]["cwd"].as_str().unwrap_or_default().into(),title:String::new(),tool:"opencode".into(),created_at:t,updated_at:t}).clone();
+        let key=format!("{sid}:{id}");
+        let rec=Rec{key:key.clone(),origin,s:0,t,m:m["modelID"].as_str().or_else(||m["model"]["id"].as_str()).unwrap_or("unknown").into(),a:m["agent"].as_str().or_else(||m["mode"].as_str()).unwrap_or("main").into(),tool:"opencode".into(),i,o,r,c,inclusive:false};
+        out.push((sid.into(),key,session,rec));
+    }
+    Ok(out)
 }

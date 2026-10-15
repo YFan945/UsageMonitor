@@ -70,6 +70,7 @@ const DEFAULT_ROOT = path.join(HOME, '.kimi-code', 'sessions');
 const AGENTS = [
   ['kimi', 'Kimi Code', '.kimi-code/sessions', 'native'],
   ['claude', 'Claude Code', '.claude/projects', 'native'],
+  ['opencode', 'OpenCode', '.local/share/opencode', 'native'],
   ['codex', 'Codex', '.codex/sessions', 'native'],
   ['workbuddy', 'WorkBuddy', '.workbuddy/projects', 'native'],
   ['codebuddy', 'CodeBuddy', '.codebuddy/projects', 'compatible'],
@@ -77,7 +78,7 @@ const AGENTS = [
   ['doubao', 'Doubao', '', 'import'],
   ['trae', 'Trae', '', 'import'],
   ['dsh', 'DeepSeek Harness', '.dsh/sessions', 'native'],
-].map(([id, name, dir, support]) => ({ id, name, support, defaultRoot: dir ? path.join(id === 'dsh' && process.env.DSH_HOME ? process.env.DSH_HOME : HOME, id === 'dsh' && process.env.DSH_HOME ? 'sessions' : dir) : '' }));
+].map(([id, name, dir, support]) => ({ id, name, support, defaultRoot: id === 'opencode' ? path.join(process.env.XDG_DATA_HOME || path.join(HOME, '.local', 'share'), 'opencode') : dir ? path.join(id === 'dsh' && process.env.DSH_HOME ? process.env.DSH_HOME : HOME, id === 'dsh' && process.env.DSH_HOME ? 'sessions' : dir) : '' }));
 function validMonitors(monitors) {
   return Array.isArray(monitors) && monitors.every(m => m && AGENTS.some(a => a.id === m.agent) &&
     typeof m.root === 'string' && typeof m.enabled === 'boolean');
@@ -261,12 +262,13 @@ function parseWireFile(file) {
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
   const out = [];
-  for (const line of text.split('\n')) {
+  for (const [lineIndex, line] of text.split('\n').entries()) {
     if (!line.includes('usage.record')) continue;
     try {
       const ev = JSON.parse(line);
       if (ev.type !== 'usage.record' || !ev.usage) continue;
       out.push({
+        _key: String(lineIndex), _origin: file,
         t: typeof ev.time === 'number' ? ev.time : 0,
         m: ev.model || 'unknown',
         a: ev.agentId || 'main',
@@ -367,11 +369,12 @@ function scan() {
       catch (e) { warnings.push({agent:monitor.agent,root:monitor.root,error:String(e.message || e)}); }
     }
   }
+  enrichSessionTitles(sessions, warnings);
+  mergeHistory(sessions, records, warnings);
   finalizeAgentRecords(records);
   for (const session of sessions) if (session.tool !== 'kimi') {session.createdAt=Infinity;session.updatedAt=0;}
   for (const rec of records) {const session=sessions[rec.s];if (session.tool === 'kimi') continue;session.createdAt=Math.min(session.createdAt,rec.t);session.updatedAt=Math.max(session.updatedAt,rec.t);}
   for (const session of sessions) if (!Number.isFinite(session.createdAt)) session.createdAt=0;
-  enrichSessionTitles(sessions, warnings);
   const availableModels = [...new Set(records.map(r => r.m))].sort();
   if (CFG.models.length) {
     const allowed = new Set(CFG.models);
@@ -447,7 +450,7 @@ function parseAgentFile(file, agent) {
     const r = tokenCount(u.inputCacheRead ?? u.cache_read_input_tokens ?? u.cached_input_tokens ?? u.cacheReadTokens);
     const c = tokenCount(u.inputCacheCreation ?? u.cache_creation_input_tokens ?? u.cache_write_input_tokens ?? u.cacheWriteTokens);
     const input = tokenCount(u.inputOther ?? u.input_tokens ?? u.inputTokens);
-    const record = { sid, key, t, m: model, tool: agent, a: e.agentId || 'main',
+    const record = { _origin: file, sid, key, t, m: model, tool: agent, a: e.agentId || 'main',
       i: input, _inclusive: inclusive,
       o: tokenCount(u.output ?? u.output_tokens ?? u.outputTokens), r, c };
     const existing = out.get(key);
@@ -496,6 +499,10 @@ function* readLogLines(file) {
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 function scanAgent(monitor, sessions, records, seen, eventIds, warnings) {
+  if (monitor.agent === 'opencode') {
+    appendAgentRecords(parseOpencode(monitor.root, warnings), monitor.agent, sessions, records, eventIds);
+    return;
+  }
   const database = path.join(monitor.root, 'db.sqlite');
   if (monitor.agent === 'zcode' && fs.existsSync(database)) {
     const parsed = parseZcodeDatabase(database);
@@ -556,7 +563,7 @@ function appendAgentRecords(data, agent, sessions, records, eventIds) {
       }
       const { sid, key, ...rec } = r;
       eventIds.set(eventKey, records.length);
-      records.push({ s: si, ...rec });
+      records.push({ s: si, ...rec, _key: key });
     }
 }
 // 累计快照跨文件统一排序求差；原始输入合并完成后才扣缓存。
@@ -572,7 +579,7 @@ function finalizeAgentRecords(records) {
       previous.set(key, counts.map((n,i)=>Math.max(n,prev[i])));
     }
     if (rec._inclusive) rec.i = Math.max(0,rec.i-rec.r-rec.c);
-    delete rec._inclusive; delete rec.sid; delete rec.key;
+    delete rec._origin; delete rec._key; delete rec._inclusive; delete rec.sid; delete rec.key;
   }
   for (let i=records.length-1;i>=0;i--) if (records[i].tool === 'codex' && !['i','o','r','c'].some(k=>records[i][k])) records.splice(i,1);
 }
@@ -626,7 +633,7 @@ function parseZcodeDatabase(file) {
       const t = toEpoch(row.completed_at || row.started_at); if (t <= 0) continue;
       const sid = row.session_id;
       sessionMap.set(sid, {id:sid,cwd:row.cwd || '',title:row.title || '',tool:'zcode',createdAt:t,updatedAt:t});
-      records.push({sid,key:sid+':'+row.id,t,m:row.model_id || 'unknown',tool:'zcode',a:row.agent || 'main',
+      records.push({_origin:file,sid,key:sid+':'+row.id,t,m:row.model_id || 'unknown',tool:'zcode',a:row.agent || 'main',
         i:tokenCount(row.input_tokens),_inclusive:true,o:tokenCount(row.output_tokens),r:tokenCount(row.cache_read_input_tokens),c:tokenCount(row.cache_creation_input_tokens)});
     }
     return {sessions:[...sessionMap.values()],records};
@@ -661,6 +668,135 @@ function getData() {
   const data = scan();
   lastScan = { at: now, data };
   return data;
+}
+
+// 原始事件先归档，再做累计差值与模型筛选。源目录消失不删除历史。
+const HISTORY_FILE = path.join(CONFIG_DIR, 'usage-history.json');
+let history = new Map(), historyLoaded = false, historyDirty = false, historyError = '';
+function historyPath(value) {
+  const absolute=path.resolve(value).replaceAll('\\','/').replace(/^\/\/\?\//,'');
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+}
+function sourceEnabled(origin, tool) {
+  const roots = [...(tool === 'kimi' ? CFG.roots : []), ...(CFG.monitors || []).filter(m => m.enabled && m.agent === tool && m.root).map(m => m.root)];
+  return roots.some(root => {
+    const relative = path.relative(path.resolve(root), path.resolve(origin));
+    return relative === '' || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+  });
+}
+function validHistory(data) {
+  return data?.version === 1 && Array.isArray(data.entries) && data.entries.every(entry => {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string') return false;
+    const session=entry[1]?.session, record=entry[1]?.record;
+    return session && record && ['id','cwd','title','tool'].every(k=>typeof session[k]==='string') &&
+      ['createdAt','updatedAt'].every(k=>Number.isFinite(session[k])) && session.tool===record.tool &&
+      ['_key','_origin','m','a','tool'].every(k=>typeof record[k]==='string') && Number.isFinite(record.t) &&
+      ['i','o','r','c'].every(k=>Number.isSafeInteger(record[k]) && record[k]>=0) &&
+      (record._inclusive === undefined || typeof record._inclusive === 'boolean');
+  });
+}
+function mergeHistory(sessions, records, warnings) {
+  if (!historyLoaded) {
+    historyLoaded = true;
+    for (const file of [HISTORY_FILE, HISTORY_FILE + '.bak']) {
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (!validHistory(data)) throw new Error('用量档案格式无效');
+        history = new Map(data.entries); historyError = ''; historyDirty = file !== HISTORY_FILE; break;
+      } catch (e) { if (e.code !== 'ENOENT') historyError = e.message; }
+    }
+  }
+  if (historyError) warnings.push({agent:'history', error:'用量档案读取失败：' + historyError});
+  let changed = false;
+  for (const rec of records) {
+    const session = sessions[rec.s];
+    const {s, ...record} = rec;
+    record._origin=historyPath(record._origin);
+    const key = JSON.stringify([rec.tool, session.id, rec.tool === 'kimi' ? record._origin : '', rec._key]);
+    const old = history.get(key);
+    if (old && rec.tool !== 'dsh') {
+      for (const f of ['i','o','r','c']) record[f] = Math.max(record[f], old.record[f]);
+      record._inclusive ||= old.record._inclusive;
+      if (rec.tool === 'codex') record.t = Math.min(record.t,old.record.t);
+    }
+    const metadata={...session};
+    if (old) {metadata.title ||= old.session.title;metadata.cwd ||= old.session.cwd;}
+    const value = {session:metadata,record};
+    if (JSON.stringify(old) !== JSON.stringify(value)) { history.set(key,value); changed = true; }
+  }
+  historyDirty ||= changed;
+  if (historyDirty && !historyError) {
+    try {
+      const tmp = HISTORY_FILE + '.tmp';
+      const fd = fs.openSync(tmp,'w');
+      try {fs.writeFileSync(fd,JSON.stringify({version:1,entries:[...history]}));fs.fsyncSync(fd);} finally {fs.closeSync(fd);}
+      if (fs.existsSync(HISTORY_FILE)) {
+        let valid=false;try {const old=JSON.parse(fs.readFileSync(HISTORY_FILE,'utf8'));valid=validHistory(old);} catch {}
+        if(valid) fs.copyFileSync(HISTORY_FILE,HISTORY_FILE+'.bak');
+      }
+      fs.renameSync(tmp,HISTORY_FILE);
+      historyDirty=false;
+    } catch (e) {warnings.push({agent:'history',error:'用量档案保存失败：'+e.message});}
+  }
+  records.length = 0;
+  for (const {session,record} of history.values()) {
+    if (!sourceEnabled(record._origin,record.tool)) continue;
+    let si = sessions.findIndex(s=>s.tool===session.tool && s.id===session.id);
+    if (si < 0) {si=sessions.length;sessions.push({...session});}
+    else {sessions[si].title ||= session.title;sessions[si].cwd ||= session.cwd;}
+    records.push({s:si,...record});
+  }
+}
+
+// OpenCode 新旧消息表已汇总用量，不叠加 part 的 step-finish。
+function parseOpencode(root, warnings = []) {
+  const sessions = new Map(), records = [];
+  function message(m, origin) {
+    if (m.role !== 'assistant' || !m.tokens || !m.id || !m.sessionID) return;
+    const u=m.tokens, t=toEpoch(m.time?.completed || m.time?.created);
+    if (t <= 0 || !['input','output'].some(k=>tokenCount(u[k])) && !tokenCount(u.cache?.read) && !tokenCount(u.cache?.write)) return;
+    const sid=m.sessionID;
+    if (!sessions.has(sid)) sessions.set(sid,{id:sid,cwd:m.path?.cwd || '',title:'',tool:'opencode',createdAt:t,updatedAt:t});
+    records.push({sid,key:sid+':'+m.id,_origin:origin,t,m:m.modelID || m.model?.id || 'unknown',tool:'opencode',a:m.agent || m.mode || 'main',i:tokenCount(u.input),o:tokenCount(u.output),r:tokenCount(u.cache?.read),c:tokenCount(u.cache?.write)});
+  }
+  const database=path.join(root,'opencode.db');
+  if (fs.existsSync(database)) {
+    if (!DatabaseSync) throw new Error('OpenCode 数据库需要 Node.js 内置 SQLite；请使用 Node.js 24 或桌面版');
+    const db=new DatabaseSync(database,{readOnly:true});
+    try {
+      const tables=new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r=>r.name));
+      if (!tables.has('message') && !tables.has('session_message')) throw new Error('不支持的 OpenCode 数据库结构：缺少消息表');
+      for (const table of ['session','session_v2']) if (tables.has(table)) {
+        for (const row of db.prepare('SELECT id,directory,title FROM '+table).iterate()) sessions.set(row.id,{id:row.id,cwd:row.directory || '',title:row.title || '',tool:'opencode',createdAt:0,updatedAt:0});
+      }
+      for (const table of ['message','session_message']) if (tables.has(table)) {
+        const modern=table==='session_message';
+        for (const row of db.prepare('SELECT id,session_id,data'+(modern?',type':'')+' FROM '+table).iterate()) {
+          try {message({...JSON.parse(row.data),id:row.id,sessionID:row.session_id,...(modern?{role:row.type}:{})},database);}
+          catch (e) {warnings.push({agent:'opencode',root,file:database,error:`${table}/${row.id}：${e.message}`});}
+        }
+      }
+    } finally {db.close();}
+  } else {
+    const storage=fs.existsSync(path.join(root,'storage')) ? path.join(root,'storage') : root;
+    function walk(dir,kind,depth=0) {
+      if (depth>4) return;
+      for (const e of listDir(dir)) {
+        const file=path.join(dir,e.name);
+        if(e.isDirectory()) walk(file,kind,depth+1);
+        else if(e.isFile() && e.name.endsWith('.json')) {
+          try {
+            const data=JSON.parse(fs.readFileSync(file,'utf8'));
+            if(kind==='message') message(data,file);
+            else if(data.id) sessions.set(data.id,{id:data.id,cwd:data.directory || '',title:data.title || '',tool:'opencode',createdAt:toEpoch(data.time?.created),updatedAt:toEpoch(data.time?.updated)});
+          } catch (e) {warnings.push({agent:'opencode',root,file,error:e.message});}
+        }
+      }
+    }
+    walk(path.join(storage,'session'),'session');walk(path.join(storage,'message'),'message');
+    if (!fs.existsSync(root)) throw new Error('OpenCode 数据目录不存在');
+  }
+  return {sessions:[...sessions.values()],records};
 }
 
 // ---------- HTTP ----------
@@ -813,6 +949,8 @@ server.listen(PORT, '127.0.0.1', () => {
   log(`[kimi-usage-monitor] http://127.0.0.1:${PORT}`);
   const activeRoots = [...CFG.roots, ...(CFG.monitors || []).filter(m => m.enabled).map(m => m.root)];
   log(`[kimi-usage-monitor] 数据目录: ${activeRoots.join(' ; ') || '(未配置，请打开页面右上角"设置"添加)'}`);
+  getData();
+  setInterval(() => {try {getData();} catch (e) {log('后台采集失败：'+e.message);}}, 30000).unref();
   ensureWinShortcut();
   startTray();
   if (isSEA && !process.env.KIMI_NO_OPEN) openBrowser(`http://127.0.0.1:${PORT}/`);

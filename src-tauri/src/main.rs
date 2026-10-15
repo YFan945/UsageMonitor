@@ -26,9 +26,14 @@ const ICON_192: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../
 const ICON_512: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../public/icon-512.png"));
 
 // ---------- 数据结构 ----------
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Rec {
+    #[serde(default, skip_serializing)]
     s: usize,
+    #[serde(rename="_key")]
+    key: String,
+    #[serde(rename="_origin")]
+    origin: String,
     t: i64,
     m: String,
     a: String,
@@ -37,16 +42,19 @@ struct Rec {
     o: i64,
     r: i64,
     c: i64,
+    #[serde(default, rename="_inclusive")]
     inclusive: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Session {
     id: String,
     cwd: String,
     title: String,
     tool: String,
+    #[serde(rename="createdAt")]
     created_at: i64,
+    #[serde(rename="updatedAt")]
     updated_at: i64,
 }
 
@@ -74,6 +82,10 @@ struct Engine {
     default_probe: Option<(bool, Option<Value>)>,
     agent_cache: HashMap<(String, PathBuf), (i64, u64, Vec<(String, String, Session, Rec)>)>,
     scan_warnings: Vec<Value>,
+    history: std::collections::BTreeMap<String, HistoryEntry>,
+    history_loaded: bool,
+    history_dirty: bool,
+    history_error: String,
 }
 
 fn merge_duplicate(records: &mut [Rec], ids: &mut HashMap<String,usize>, agent: &str, event: &str, rec: &Rec) -> bool {
@@ -88,6 +100,88 @@ fn merge_duplicate(records: &mut [Rec], ids: &mut HashMap<String,usize>, agent: 
         }
         true
     } else {ids.insert(key,records.len());false}
+}
+
+fn history_path(value: &str) -> String {
+    let path=Path::new(value);
+    let absolute=if path.is_absolute() {path.to_path_buf()} else {std::env::current_dir().unwrap_or_default().join(path)};
+    let mut clean=PathBuf::new();
+    for component in absolute.components() {
+        match component {std::path::Component::CurDir=>{},std::path::Component::ParentDir=>{clean.pop();},other=>clean.push(other.as_os_str())}
+    }
+    let value=clean.to_string_lossy().replace('\\',"/").trim_start_matches("//?/").to_string();
+    if cfg!(windows) {value.to_lowercase()} else {value}
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct HistoryEntry { session: Session, record: Rec }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryFile { version: u32, entries: Vec<(String, HistoryEntry)> }
+
+impl Engine {
+    fn merge_history(&mut self, sessions: &mut Vec<Session>, records: &mut Vec<Rec>) {
+        let file = self.config_dir.join("usage-history.json");
+        if !self.history_loaded {
+            self.history_loaded = true;
+            for candidate in [file.clone(), file.with_extension("json.bak")] {
+                match std::fs::read(&candidate) {
+                    Ok(bytes) => match serde_json::from_slice::<HistoryFile>(&bytes) {
+                        Ok(data) if data.version==1 => {self.history=data.entries.into_iter().collect();self.history_error.clear();self.history_dirty=candidate!=file;break;},
+                        _ => self.history_error="用量档案格式无效".into(),
+                    },
+                    Err(e) if e.kind()==std::io::ErrorKind::NotFound => {},
+                    Err(e) => self.history_error=e.to_string(),
+                }
+            }
+        }
+        if !self.history_error.is_empty() {self.scan_warnings.push(json!({"agent":"history","error":format!("用量档案读取失败：{}",self.history_error)}));}
+        let mut changed=false;
+        for rec in records.iter() {
+            let mut session=sessions[rec.s].clone();
+            let mut record=rec.clone();record.s=0;record.origin=history_path(&rec.origin);
+            let key=json!([rec.tool,session.id,if rec.tool=="kimi" {record.origin.as_str()} else {""},rec.key]).to_string();
+            if let Some(old)=self.history.get(&key) {
+                if session.title.is_empty() {session.title=old.session.title.clone();}
+                if session.cwd.is_empty() {session.cwd=old.session.cwd.clone();}
+                if rec.tool!="dsh" {
+                    record.i=record.i.max(old.record.i);record.o=record.o.max(old.record.o);record.r=record.r.max(old.record.r);record.c=record.c.max(old.record.c);
+                    record.inclusive |= old.record.inclusive;
+                    if rec.tool=="codex" {record.t=record.t.min(old.record.t);}
+                }
+            }
+            let value=HistoryEntry{session,record};
+            if self.history.get(&key).map(|v|serde_json::to_value(v).ok()) != Some(serde_json::to_value(&value).ok()) {
+                self.history.insert(key,value);changed=true;
+            }
+        }
+        if changed {self.history_dirty=true;}
+        if self.history_dirty && self.history_error.is_empty() {
+            let result=(|| -> std::io::Result<()> {
+                use std::io::Write;
+                std::fs::create_dir_all(&self.config_dir)?;
+                let tmp=file.with_extension("json.tmp");
+                let mut output=std::fs::File::create(&tmp)?;
+                serde_json::to_writer(&mut output,&HistoryFile{version:1,entries:self.history.iter().map(|(k,v)|(k.clone(),v.clone())).collect()})?;
+                output.flush()?;output.sync_all()?;drop(output);
+                if std::fs::read(&file).ok().and_then(|b|serde_json::from_slice::<HistoryFile>(&b).ok()).map(|h|h.version==1).unwrap_or(false) {std::fs::copy(&file,file.with_extension("json.bak"))?;}
+                std::fs::rename(tmp,&file)?;
+                Ok(())
+            })();
+            match result {Ok(())=>self.history_dirty=false,Err(e)=>self.scan_warnings.push(json!({"agent":"history","error":format!("用量档案保存失败：{e}")}))}
+        }
+        records.clear();
+        for entry in self.history.values() {
+            let rec=&entry.record;
+            let mut roots=if rec.tool=="kimi" {self.cfg.roots.clone()} else {Vec::new()};
+            roots.extend(self.cfg.monitors.clone().unwrap_or_default().iter().filter(|m|m["enabled"]==true && m["agent"]==rec.tool).filter_map(|m|m["root"].as_str().filter(|s|!s.is_empty()).map(String::from)));
+            let origin=history_path(&rec.origin);
+            if !roots.iter().any(|root|{let root=history_path(root).trim_end_matches('/').to_string();origin==root || origin.starts_with(&(root+"/"))}) {continue;}
+            let si=sessions.iter().position(|s|s.tool==entry.session.tool && s.id==entry.session.id).unwrap_or_else(||{sessions.push(entry.session.clone());sessions.len()-1});
+            if sessions[si].title.is_empty() {sessions[si].title=entry.session.title.clone();}
+            if sessions[si].cwd.is_empty() {sessions[si].cwd=entry.session.cwd.clone();}
+            let mut rec=rec.clone();rec.s=si;records.push(rec);
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -256,7 +350,7 @@ impl Engine {
     fn parse_wire_file(file: &Path) -> Vec<Rec> {
         let Ok(text) = std::fs::read_to_string(file) else { return Vec::new() };
         let mut out = Vec::new();
-        for line in text.lines() {
+        for (line_index, line) in text.lines().enumerate() {
             if !line.contains("usage.record") {
                 continue;
             }
@@ -266,6 +360,7 @@ impl Engine {
             }
             let Some(u) = ev.get("usage") else { continue };
             out.push(Rec {
+                key: line_index.to_string(), origin: file.to_string_lossy().to_string(),
                 s: 0, // 扫描会话时设置索引，缓存记录不绑定会话顺序
                 t: ev.get("time").and_then(|v| v.as_i64()).unwrap_or(0),
                 m: ev.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
@@ -384,8 +479,9 @@ impl Engine {
                 continue;
             }
             let database=root.join("db.sqlite");
-            if agent=="zcode" && database.exists() {
-                match agents::parse_zcode_database(&database) {
+            if agent=="opencode" || agent=="zcode" && database.exists() {
+                let parsed=if agent=="opencode" {agents::parse_opencode(root,&mut self.scan_warnings)} else {agents::parse_zcode_database(&database)};
+                match parsed {
                     Ok(data)=>for (sid,event,session,mut rec) in data {
                         if merge_duplicate(&mut records, &mut event_ids, agent, &event, &rec) {continue;}
                         let si=sessions.iter().position(|s|s.tool==agent && s.id==sid).unwrap_or_else(||{sessions.push(session);sessions.len()-1});
@@ -421,6 +517,8 @@ impl Engine {
         }
         self.agent_cache.retain(|k,_| agent_seen.contains(k));
         self.wire_cache.retain(|k, _| seen.contains_key(k));
+        agents::enrich_titles(&mut sessions,&self.cfg.monitors.clone().unwrap_or_default(),&mut self.scan_warnings);
+        self.merge_history(&mut sessions, &mut records);
         records.sort_by_key(|r|r.t);
         let mut previous: HashMap<usize,[i64;4]> = HashMap::new();
         for r in &mut records {
@@ -436,7 +534,6 @@ impl Engine {
         for session in &mut sessions {if session.tool!="kimi" {session.created_at=i64::MAX;session.updated_at=0;}}
         for r in &records {let s=&mut sessions[r.s];if s.tool=="kimi" {continue;}s.created_at=s.created_at.min(r.t);s.updated_at=s.updated_at.max(r.t);}
         for s in &mut sessions {if s.created_at==i64::MAX {s.created_at=0;}}
-        agents::enrich_titles(&mut sessions,&self.cfg.monitors.clone().unwrap_or_default(),&mut self.scan_warnings);
         (sessions, records)
     }
 
@@ -756,6 +853,12 @@ fn main() {
                 e.load_config();
             }
 
+            let collector = engine.clone();
+            std::thread::spawn(move || loop {
+                if let Ok(mut e) = collector.lock() {e.get_data_string();}
+                std::thread::sleep(Duration::from_secs(30));
+            });
+
             // 启动内嵌 HTTP 服务并等待端口就绪
             let (tx, rx) = std::sync::mpsc::channel::<u16>();
             let app_handle = app.handle().clone();
@@ -826,6 +929,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_history_retains_deleted_sources_across_restart_and_filters() {
+        let f=Fixture::new();
+        let oc=f.0.join("oc");std::fs::create_dir_all(&oc).unwrap();let file=oc.join("opencode.db");
+        let db=rusqlite::Connection::open(&file).unwrap();
+        db.execute_batch("CREATE TABLE session(id TEXT,directory TEXT,title TEXT);CREATE TABLE message(id TEXT,session_id TEXT,data TEXT);CREATE TABLE part(id TEXT,data TEXT);INSERT INTO session VALUES('s','project','OC 标题');").unwrap();
+        let message=json!({"role":"assistant","modelID":"oc-model","agent":"build","time":{"created":1790935200000i64,"completed":1790935200001i64},"tokens":{"input":20,"output":10,"reasoning":3,"cache":{"read":80,"write":5}}});
+        db.execute("INSERT INTO message VALUES('m','s',?1)",[message.to_string()]).unwrap();db.execute_batch("INSERT INTO message VALUES('broken','s','{bad');").unwrap();db.execute("INSERT INTO part VALUES('part',?1)",[message.to_string()]).unwrap();db.close().unwrap();
+        let original=std::fs::read(&file).unwrap();
+        let modern_root=f.0.join("modern");std::fs::create_dir_all(&modern_root).unwrap();
+        let modern=rusqlite::Connection::open(modern_root.join("opencode.db")).unwrap();
+        modern.execute_batch("CREATE TABLE session_v2(id TEXT,directory TEXT,title TEXT);CREATE TABLE session_message(id TEXT,session_id TEXT,type TEXT,data TEXT);INSERT INTO session_v2 VALUES('modern','modern-project','新版标题');").unwrap();
+        let mut modern_message=message.clone();modern_message.as_object_mut().unwrap().remove("role");modern_message.as_object_mut().unwrap().remove("modelID");modern_message["model"]=json!({"id":"modern-model"});
+        modern.execute("INSERT INTO session_message VALUES('modern-msg','modern','assistant',?1)",[modern_message.to_string()]).unwrap();
+        modern.execute("INSERT INTO session_message VALUES('user','modern','user',?1)",[modern_message.to_string()]).unwrap();modern.close().unwrap();
+        f.write("legacy/storage/session/project/s.json",&json!({"id":"legacy","directory":"old","title":"旧版标题"}).to_string());
+        f.write("legacy/storage/message/legacy/broken.json","{bad");
+        let mut old=message.clone();old["id"]=json!("old-msg");old["sessionID"]=json!("legacy");
+        f.write("legacy/storage/message/legacy/m.json",&old.to_string());
+        f.write("sessions/k/agents/main/wire.jsonl",&event("kimi",9));
+        let codex=|n,time|json!({"type":"event_msg","timestamp":time,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":n,"cached_input_tokens":n/2,"output_tokens":10}}}}).to_string();
+        f.write("codex/a.jsonl",&format!("{}\n{}\n{}",json!({"type":"session_meta","payload":{"id":"codex"}}),codex(100,"2026-10-02T10:00:00Z"),codex(200,"2026-10-02T10:01:00Z")));
+        let cfg=json!({"roots":[f.0.join("sessions")],"models":[],"setupDone":true,"monitors":[{"agent":"opencode","root":oc,"enabled":true},{"agent":"opencode","root":modern_root,"enabled":true},{"agent":"opencode","root":f.0.join("legacy"),"enabled":true},{"agent":"codex","root":f.0.join("codex"),"enabled":true}]});
+        let mut e=f.engine();e.apply_config(&cfg);
+        let (sessions,records)=e.scan();assert_eq!(records.len(),6);assert_eq!(std::fs::read(&file).unwrap(),original);assert!(e.scan_warnings.iter().any(|w|w["agent"]=="opencode"));
+        let oc_rec=records.iter().find(|r|r.tool=="opencode").unwrap();assert_eq!((oc_rec.i,oc_rec.o,oc_rec.r,oc_rec.c),(20,10,80,5));
+        assert!(sessions.iter().any(|s|s.title=="OC 标题"));
+        assert!(sessions.iter().any(|s|s.title=="新版标题"));assert!(records.iter().any(|r|r.m=="modern-model"));
+        let total=records.iter().map(|r|r.i+r.o+r.r+r.c).sum::<i64>();
+        assert_eq!(records.iter().filter(|r|r.tool=="codex").map(|r|r.i+r.r).sum::<i64>(),200);
+        for relative in ["oc/opencode.db","modern/opencode.db","legacy/storage/message/legacy/m.json","legacy/storage/session/project/s.json","codex/a.jsonl","sessions/k/agents/main/wire.jsonl"] {std::fs::remove_file(f.0.join(relative)).unwrap();}
+        let (_,again)=e.scan();assert_eq!(again.len(),6);assert_eq!(again.iter().map(|r|r.i+r.o+r.r+r.c).sum::<i64>(),total);
+        let mut restored=Engine::new(e.config_dir.clone());let (_,again)=restored.scan();assert_eq!(again.len(),6);assert_eq!(again.iter().map(|r|r.i+r.o+r.r+r.c).sum::<i64>(),total);
+        restored.apply_config(&json!({"roots":[],"monitors":[],"models":[]}));assert!(restored.scan().1.is_empty());
+        restored.apply_config(&cfg);assert_eq!(restored.scan().1.len(),6);
+        // 备份可恢复损坏主文件。
+        let history=e.config_dir.join("usage-history.json");std::fs::copy(&history,e.config_dir.join("usage-history.json.bak")).unwrap();std::fs::write(&history,"broken").unwrap();
+        let mut recovered=Engine::new(e.config_dir.clone());assert_eq!(recovered.scan().1.len(),6);assert!(recovered.history_error.is_empty());
+        let tmp=e.config_dir.join("usage-history.json.tmp");std::fs::create_dir(&tmp).unwrap();
+        let mut retry=old.clone();retry["id"]=json!("retry");
+        f.write("legacy/storage/message/legacy/retry.json",&retry.to_string());
+        assert_eq!(recovered.scan().1.len(),7);assert!(recovered.scan_warnings.iter().any(|w|w["agent"]=="history"));
+        std::fs::remove_file(f.0.join("legacy/storage/message/legacy/retry.json")).unwrap();std::fs::remove_dir(tmp).unwrap();
+        assert_eq!(recovered.scan().1.len(),7);assert!(!recovered.history_dirty);
+        let mut restarted=Engine::new(e.config_dir.clone());assert_eq!(restarted.scan().1.len(),7);
+    }
 
     #[test]
     fn close_action_roundtrip_and_validation() {

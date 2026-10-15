@@ -134,7 +134,7 @@ test('多 Agent 日志：流式去重、Codex 累计差分、子 agent 与重叠
   const res = await request('/api/config',{monitors,models:[],setupDone:true});
   assert.equal(res.status,200);
   const data = await (await request('/api/data')).json();
-  assert.equal(data.agents.length,9);
+  assert.equal(data.agents.length,10);
   const claude = data.records.filter(r=>r.tool==='claude');
   assert.equal(claude.length,2);
   assert.equal(claude.reduce((n,r)=>n+r.o,0),10);

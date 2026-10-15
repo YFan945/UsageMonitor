@@ -591,7 +591,7 @@ async function loadData() {
     refreshFilterOptions();
     maybeOnboard();
     $('#updated').textContent = '数据更新于 ' + new Date(j.generatedAt).toLocaleTimeString('zh-CN', { hour12: false });
-    if (j.warnings?.length) $('#updated').textContent += ` · ${j.warnings.length} 个来源读取异常，请查看设置`;
+    if (j.warnings?.length) $('#updated').textContent += ` · ${j.warnings.map(w=>w.agent === 'history' ? w.error : `${w.agent} 读取异常，请查看设置`).join('；')}`;
     render();
   } catch (e) { $('#updated').textContent = '加载失败: ' + e.message; }
 }
@@ -1028,7 +1028,7 @@ function renderMonitors(selector, configured) {
   $(selector).innerHTML = rows.map(m => {
     const a = DATA.agents.find(a => a.id === m.agent);
     const root = m.root || (!m.enabled ? a.defaultRoot : '');
-    const note = a.id === 'zcode' ? '优先读取 CLI db.sqlite；兼容 rollout model_io 日志' : a.id === 'dsh' ? `读取 v2–v4 会话 JSONL${a.compressedLogs ? '，支持 Zstandard 压缩' : '；压缩日志需 Node.js 22.15+ 或桌面版'}` : a.support === 'native' ? '直接读取本地会话 JSONL' : a.support === 'compatible' ? '兼容 Claude / WorkBuddy 风格 JSONL；不同版本需核对日志格式' : '需接入标准 usage.record JSONL；尚不支持原生私有日志';
+    const note = a.id === 'opencode' ? '只读 opencode.db；兼容旧版 storage/session 和 storage/message JSON' : a.id === 'zcode' ? '优先读取 CLI db.sqlite；兼容 rollout model_io 日志' : a.id === 'dsh' ? `读取 v2–v4 会话 JSONL${a.compressedLogs ? '，支持 Zstandard 压缩' : '；压缩日志需 Node.js 22.15+ 或桌面版'}` : a.support === 'native' ? '直接读取本地会话 JSONL' : a.support === 'compatible' ? '兼容 Claude / WorkBuddy 风格 JSONL；不同版本需核对日志格式' : '需接入标准 usage.record JSONL；尚不支持原生私有日志';
     const n = DATA.records.filter(r => r.tool === m.agent).length;
     const warnings = (DATA.warnings || []).filter(w=>w.agent === m.agent && w.root === m.root).map(w=>w.file ? `${w.file}：${w.error}` : w.error).join('；');
     return `<div class="monitor-row" data-agent="${esc(m.agent)}"><label><input type="checkbox" ${m.enabled?'checked':''}>${esc(a.name)}</label><input class="monitor-path" aria-label="${esc(a.name)} 日志目录" value="${esc(root)}" placeholder="${a.support==='import'?'标准用量 JSONL 所在目录':'本机会话目录'}"><small>${note}${a.detected?' · 已发现默认目录':''}${DATA.setupDone && m.enabled ? ` · ${m.exists === false ? '目录不存在' : `${fmtFull(n)} 条记录（Agent 总计，当前模型设置）`}` : ''}${warnings?` · 读取异常：${esc(warnings)}`:''}</small></div>`;
