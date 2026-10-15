@@ -673,14 +673,27 @@ function getData() {
 // 原始事件先归档，再做累计差值与模型筛选。源目录消失不删除历史。
 const HISTORY_FILE = path.join(CONFIG_DIR, 'usage-history.json');
 let history = new Map(), historyLoaded = false, historyDirty = false, historyError = '';
+let historyPaths = new Map();
 function historyPath(value) {
-  const absolute=path.resolve(value).replaceAll('\\','/').replace(/^\/\/\?\//,'');
-  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  if (historyPaths.has(value)) return historyPaths.get(value);
+  let ancestor=path.resolve(value), missing=[];
+  while (true) {
+    try {ancestor=path.join(fs.realpathSync(ancestor),...missing.reverse());break;}
+    catch {
+      const parent=path.dirname(ancestor);
+      if (parent===ancestor) {ancestor=path.resolve(value);break;}
+      missing.push(path.basename(ancestor));ancestor=parent;
+    }
+  }
+  const absolute=ancestor.replaceAll('\\','/').replace(/^\/\/\?\/UNC\//,'//').replace(/^\/\/\?\//,'');
+  const normalized=process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  historyPaths.set(value,normalized);
+  return normalized;
 }
 function sourceEnabled(origin, tool) {
   const roots = [...(tool === 'kimi' ? CFG.roots : []), ...(CFG.monitors || []).filter(m => m.enabled && m.agent === tool && m.root).map(m => m.root)];
   return roots.some(root => {
-    const relative = path.relative(path.resolve(root), path.resolve(origin));
+    const relative = path.relative(historyPath(root), historyPath(origin));
     return relative === '' || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
   });
 }
@@ -696,6 +709,7 @@ function validHistory(data) {
   });
 }
 function mergeHistory(sessions, records, warnings) {
+  historyPaths.clear();
   if (!historyLoaded) {
     historyLoaded = true;
     for (const file of [HISTORY_FILE, HISTORY_FILE + '.bak']) {

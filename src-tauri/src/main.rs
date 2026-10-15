@@ -109,7 +109,19 @@ fn history_path(value: &str) -> String {
     for component in absolute.components() {
         match component {std::path::Component::CurDir=>{},std::path::Component::ParentDir=>{clean.pop();},other=>clean.push(other.as_os_str())}
     }
-    let value=clean.to_string_lossy().replace('\\',"/").trim_start_matches("//?/").to_string();
+    // Windows TEMP 可能使用 RUNNER~1 等短路径；缺失文件也要规范化现存父目录。
+    let mut ancestor=clean.as_path();
+    let mut missing=Vec::new();
+    let resolved=loop {
+        if let Ok(mut canonical)=std::fs::canonicalize(ancestor) {
+            for name in missing.iter().rev() {canonical.push(name);}
+            break canonical;
+        }
+        let (Some(name),Some(parent))=(ancestor.file_name(),ancestor.parent()) else {break clean.clone();};
+        missing.push(name.to_os_string());ancestor=parent;
+    };
+    let value=resolved.to_string_lossy().replace('\\',"/");
+    let value=if let Some(unc)=value.strip_prefix("//?/UNC/") {format!("//{unc}")} else {value.trim_start_matches("//?/").to_string()};
     if cfg!(windows) {value.to_lowercase()} else {value}
 }
 
@@ -135,10 +147,11 @@ impl Engine {
             }
         }
         if !self.history_error.is_empty() {self.scan_warnings.push(json!({"agent":"history","error":format!("用量档案读取失败：{}",self.history_error)}));}
+        let mut paths:HashMap<String,String>=HashMap::new();
         let mut changed=false;
         for rec in records.iter() {
             let mut session=sessions[rec.s].clone();
-            let mut record=rec.clone();record.s=0;record.origin=history_path(&rec.origin);
+            let mut record=rec.clone();record.s=0;record.origin=paths.entry(rec.origin.clone()).or_insert_with(||history_path(&rec.origin)).clone();
             let key=json!([rec.tool,session.id,if rec.tool=="kimi" {record.origin.as_str()} else {""},rec.key]).to_string();
             if let Some(old)=self.history.get(&key) {
                 if session.title.is_empty() {session.title=old.session.title.clone();}
@@ -169,13 +182,19 @@ impl Engine {
             })();
             match result {Ok(())=>self.history_dirty=false,Err(e)=>self.scan_warnings.push(json!({"agent":"history","error":format!("用量档案保存失败：{e}")}))}
         }
+        let mut enabled:HashMap<String,Vec<String>>=HashMap::new();
+        enabled.insert("kimi".into(),self.cfg.roots.iter().map(|r|history_path(r)).collect());
+        for monitor in self.cfg.monitors.clone().unwrap_or_default() {
+            if monitor["enabled"]!=true {continue;}
+            if let (Some(agent),Some(root))=(monitor["agent"].as_str(),monitor["root"].as_str().filter(|r|!r.is_empty())) {
+                enabled.entry(agent.into()).or_default().push(history_path(root));
+            }
+        }
         records.clear();
         for entry in self.history.values() {
             let rec=&entry.record;
-            let mut roots=if rec.tool=="kimi" {self.cfg.roots.clone()} else {Vec::new()};
-            roots.extend(self.cfg.monitors.clone().unwrap_or_default().iter().filter(|m|m["enabled"]==true && m["agent"]==rec.tool).filter_map(|m|m["root"].as_str().filter(|s|!s.is_empty()).map(String::from)));
-            let origin=history_path(&rec.origin);
-            if !roots.iter().any(|root|{let root=history_path(root).trim_end_matches('/').to_string();origin==root || origin.starts_with(&(root+"/"))}) {continue;}
+            let origin=paths.entry(rec.origin.clone()).or_insert_with(||history_path(&rec.origin));
+            if !enabled.get(&rec.tool).map(|roots|roots.iter().any(|root|{let root=root.trim_end_matches('/');origin==root || origin.starts_with(&(root.to_string()+"/"))})).unwrap_or(false) {continue;}
             let si=sessions.iter().position(|s|s.tool==entry.session.tool && s.id==entry.session.id).unwrap_or_else(||{sessions.push(entry.session.clone());sessions.len()-1});
             if sessions[si].title.is_empty() {sessions[si].title=entry.session.title.clone();}
             if sessions[si].cwd.is_empty() {sessions[si].cwd=entry.session.cwd.clone();}
@@ -929,6 +948,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_paths_resolve_aliases_and_missing_descendants() {
+        let f=Fixture::new();
+        let canonical=std::fs::canonicalize(&f.0).unwrap();
+        assert_eq!(history_path(&f.0.to_string_lossy()),history_path(&canonical.to_string_lossy()));
+        let missing=f.0.join("removed").join("wire.jsonl");
+        let expected=canonical.join("removed").join("wire.jsonl");
+        assert_eq!(history_path(&missing.to_string_lossy()),history_path(&expected.to_string_lossy()));
+        let dotted=f.0.join(".").join("child").join("..").join("missing");
+        assert_eq!(history_path(&dotted.to_string_lossy()),history_path(&canonical.join("missing").to_string_lossy()));
+    }
 
     #[test]
     fn opencode_history_retains_deleted_sources_across_restart_and_filters() {
